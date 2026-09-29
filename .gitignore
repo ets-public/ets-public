@@ -1,0 +1,9 @@
+node_modules/
+android/
+dist-www/
+.tools/
+signing/
+*.apk
+build-log.txt
+www/fonts/
+www/vendor/

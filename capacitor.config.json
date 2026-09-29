@@ -1,0 +1,15 @@
+{
+  "appId": "com.adam.injectiontracker",
+  "appName": "Enhanced Training Studio",
+  "webDir": "dist-www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_injection",
+      "iconColor": "#2F6F62"
+    }
+  },
+  "appendUserAgent": "EnhancedTrainingStudio/2.0 (Android app)"
+}
