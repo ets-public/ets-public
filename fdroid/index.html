@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Enhanced Training Studio · F-Droid repository</title>
+<meta name="referrer" content="no-referrer">
+<style>
+  :root { --bg:#F2F1EC; --card:#fff; --text:#1A1C1E; --muted:#62666A; --line:#1A1C1E; --signal:#C8401B; --signal-ink:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111315; --card:#181B1E; --text:#E9E7E0; --muted:#979B9E; --line:#E9E7E0; --signal:#FF6A40; --signal-ink:#111315; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 28px; line-height: 1.2; margin: 0 0 8px; }
+  .muted { color: var(--muted); }
+  .card { background: var(--card); border: 1.5px solid var(--line); padding: 20px; margin: 20px 0; }
+  .btn { display: inline-block; background: var(--signal); color: var(--signal-ink); text-decoration: none; font-weight: 600; padding: 12px 18px; }
+  a { color: var(--signal); }
+  code { font: 13px/1.5 ui-monospace, "Cascadia Mono", Menlo, monospace; word-break: break-all; }
+  ol { padding-left: 20px; }
+  li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Enhanced Training Studio on F-Droid</h1>
+  <p class="muted">Enhanced Training Studio from its developer: the same app as on https://enhancedtraining.app. Add this repository to the F-Droid app once, and updates arrive there like any other app. Tracking your protocol is free; training, blood tests and health unlock with a licence key.</p>
+
+  <div class="card">
+    <p style="margin-top:0"><a class="btn" href="fdroidrepos://__HOSTPATH__?fingerprint=__FP__">Add to F-Droid</a></p>
+    <p class="muted" style="margin-bottom:0">Open this page on your phone with F-Droid installed. If the button does nothing:</p>
+    <ol>
+      <li>In F-Droid, open <b>Settings → Repositories</b> and tap <b>+</b>.</li>
+      <li>Enter this address: <code>__URL__?fingerprint=__FP__</code></li>
+      <li>Check the fingerprint F-Droid shows matches the one below, then add it.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <p style="margin-top:0"><b>Repository fingerprint</b> (SHA-256)</p>
+    <p><code>__FP__</code></p>
+    <p class="muted" style="margin-bottom:0">The app is signed with the same key as the downloads on <a href="https://enhancedtraining.app">https://enhancedtraining.app</a> and GitHub, so F-Droid can update an app you installed from there, keeping your data.</p>
+  </div>
+
+  <div class="card">
+    <p style="margin-top:0"><b>Have a licence?</b></p>
+    <p style="margin-bottom:0">Enter your key in the app (Setup → App settings → Licence) and training, blood tests and health unlock. Nothing else to install.</p>
+  </div>
+
+  <p class="muted">The free edition's source code is at <a href="https://github.com/ets-public/ets-public">https://github.com/ets-public/ets-public</a>. The parts that need a licence aren't open source, so this build isn't made from that code alone.</p>
+</main>
+</body>
+</html>

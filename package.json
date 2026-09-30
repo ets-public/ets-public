@@ -1,6 +1,6 @@
 {
   "name": "injection-tracker",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "description": "Enhanced Training Studio (formerly Injection Tracker) - training, schedules, site rotation, vial stock, levels and labs. Capacitor Android app.",
   "scripts": {

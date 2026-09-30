@@ -69,7 +69,8 @@ function makeWeb(edition, src, out, opts) {
   const js = transformJs(readFileSync(join(src, 'app.js'), 'utf8'), edition);
   syntaxCheck(js, `${edition}/app.js`);
   writeFileSync(join(out, 'app.js'), js);
-  const info = { version: opts.version || 'dev', edition, siteUrl: opts.site || '', ...(opts.platform === 'web' ? { platform: 'web' } : {}) };
+  // built: the day this version was made; a licence unlocks versions made while it covered updates
+  const info = { version: opts.version || 'dev', edition, siteUrl: opts.site || '', ...(opts.version ? { built: new Date().toISOString().slice(0, 10) } : {}), ...(opts.platform === 'web' ? { platform: 'web' } : {}) };
   if (edition === 'premium' && opts.keys) info.licenceKeys = JSON.parse(opts.keys);
   writeFileSync(join(out, 'build-info.js'), `window.ETS_BUILD = ${JSON.stringify(info)};\n`);
   // the premium app talks to the licence server: allow it in the page's security policy

@@ -2,6 +2,21 @@
 
 Every version, newest first. Training, blood tests and health need a licence; everything else is in the free edition.
 
+## 1.0.4 · 1 Oct 2026
+
+### Licence
+
+- Training: five starter templates (Upper, Lower, Push, Pull and Legs) at 5 sets of 5, which you can change
+- Training: a Cancel button at the top of a running workout, to stop it without saving
+
+### Both editions
+
+- New: orals and supplements. Add tablets, capsules, softgels or scoops (mg, mcg, g or IU), once or twice a day, with stock counted in bottles and tablets
+- Supplements get a quick checklist on Today with Take and Take all
+- The Injections section is now called Protocol
+- Stock: keep compounds in Stock for later without adding them to your protocol, then tap Start using when you're ready
+- Stock: tap a compound's name to edit everything about its stock on one screen: the open vial or bottle, sealed ones, price, expiry and batch
+
 ## 1.0.3 · 30 Sept 2026
 
 ### Free

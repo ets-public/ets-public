@@ -1,0 +1,3 @@
+• New Stock tab: see every vial you have (open and sealed) with its size and strength, how much you have in mg, and how long it lasts at your doses. Opening a new vial takes it off your sealed count, and you're warned when you're on your last vial
+• Stock: reorder reminder based on your delivery time, cost per week and month, and expiry dates and batch numbers on vials (the soonest to expire is opened first)
+• New daily check-in: rate your energy, mood, libido and sleep and note…

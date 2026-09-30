@@ -245,6 +245,8 @@ select:focus,input:focus,textarea:focus{outline:2px solid var(--signal); outline
   min-height:44px; min-width:48px; padding:0 12px; flex:1 0 auto;
   font-family:var(--mono); font-size:12px; font-weight:500; letter-spacing:0.04em; cursor:pointer;
 }
+/* a long option (a vial with its expiry, a long name) takes a row of its own and wraps rather than running off */
+.opt{max-width:100%; overflow-wrap:anywhere; padding-top:6px; padding-bottom:6px;}
 .opt.active{background:var(--inv-bg); color:var(--inv-text); font-weight:600;}
 .opt .sub{display:block; font-size:9.5px; font-weight:400; opacity:0.75; letter-spacing:0.03em; margin-top:2px;}
 .opt.suggest:not(.active){box-shadow:inset 0 0 0 2px var(--signal);}
@@ -361,6 +363,8 @@ body.resting .toast{bottom:calc(142px + var(--sab));}
 .wk-head{padding:10px 14px;}
 .wk-headrow{display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:13px; letter-spacing:0.04em; text-transform:uppercase;}
 .wk-headrow #wkClock{font-weight:600; font-size:15px; margin-left:4px;}
+.wk-acts{display:flex; gap:8px; margin-top:10px;}
+.wk-acts .chip-btn{flex:1 1 0; min-width:0;}
 /* set inputs: no desktop spinners; on narrow phones drop the Previous column (it's shown as the placeholder) */
 table.sets input::-webkit-outer-spin-button, table.sets input::-webkit-inner-spin-button{-webkit-appearance:none; margin:0;}
 table.sets input{-moz-appearance:textfield; appearance:textfield; padding:6px 4px;}
@@ -575,3 +579,29 @@ a.btn{text-decoration:none; display:flex; align-items:center; justify-content:ce
 .ph-compare figure{margin:0;}
 .ph-compare img{width:100%; height:auto; display:block; border:1px solid var(--line);}
 .ph-none{aspect-ratio:3/4; display:flex; align-items:center; justify-content:center; border:1px dashed var(--line);}
+.chip-btn.chip-danger{color:var(--signal); border-color:var(--signal);}
+/* Supplements checklist */
+.supp-row{gap:10px;}
+.supp-row .list-main{cursor:pointer;}
+.supp-take{flex-shrink:0; min-width:72px;}
+.supp-ok{flex-shrink:0; font:600 18px var(--mono); color:var(--muted); min-width:44px; text-align:center;}
+.supp-missed{display:flex; align-items:center; gap:8px; justify-content:flex-end; margin:-6px 0 8px; color:var(--signal);}
+.supp-missed span{margin-right:auto;}
+.stock-card .tap-row{cursor:pointer;}
+/* Stock: one screen to edit everything */
+.stock-title{cursor:pointer;}
+.stock-chev{font:600 20px var(--mono); color:var(--muted); margin-left:4px;}
+.sd-line{border:1px solid var(--line); padding:10px 12px 2px; margin-bottom:10px;}
+.sd-line-head{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; font-size:0.88rem;}
+.sd-removed{display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--signal); margin-bottom:10px;}
+.stock-card .kv.kv-wrap span:first-child{white-space:normal; flex-shrink:1;}
+/* long names without spaces wrap instead of running off the card */
+.sheet h2, .stock-title{overflow-wrap:anywhere;}
+/* in rows next to buttons, "anywhere" would let a name break mid-word; break-word only splits a word that can't fit */
+.dose-name, .list-title{overflow-wrap:break-word;}
+.supp-later{align-self:center; white-space:nowrap;}
+
+/* calendar day list: the name keeps its room; the tag and buttons move under it on a narrow screen */
+.cal-item{flex-wrap:wrap; row-gap:10px;}
+.cal-item .list-main{flex:1 1 150px;}
+.cal-acts{display:flex; gap:6px; align-items:center; margin-left:auto;}

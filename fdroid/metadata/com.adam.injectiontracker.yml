@@ -1,0 +1,39 @@
+# The app's F-Droid listing. Written by ets-web/scripts/free-release.mjs: edit it there, not here.
+Categories:
+  - Sports & Health
+License: Other
+AuthorName: Enhanced Training Studio
+WebSite: https://enhancedtraining.app
+SourceCode: https://github.com/ets-public/ets-public
+IssueTracker: https://github.com/ets-public/ets-public/issues
+Changelog: https://enhancedtraining.app/changelog/
+AntiFeatures:
+  - NonFreeAdd
+  - NonFreeComp
+  - NonFreeNet
+
+Name: Enhanced Training Studio
+Summary: "Protocol, training and recovery: doses, reminders, stock and levels"
+Description: |-
+    A private tracker for your protocol: injections, orals and supplements. Everything stays on your phone.
+
+    Free:
+
+    * Schedules and cycles: every few days, set weekdays, once or twice a day, or a cycle that stops after a set number of weeks
+    * Reminders: morning and night, with Log and Snooze on the notification
+    * Logging: the draw on the syringe, injection site rotation, tablets per dose
+    * Stock: open and sealed vials or bottles, reorder reminders, expiry dates and cost
+    * Estimated levels from your doses and each compound's half-life
+    * Daily check-in: energy, mood, libido, sleep and site reactions
+    * Doctor report: a PDF of your regimen, adherence and dose log
+    * Backups to your phone or your own Google Drive, with an optional password, and an app lock
+
+    With a licence (a one-off payment from https://enhancedtraining.app, entered in the app):
+
+    * Training: workouts, templates, programmes, records and GPS runs
+    * Blood tests: PDF import, markers over time and test planning
+    * Health: Health Connect, readiness, a weekly report, live heart rate, measurements and progress photos
+
+    This is the same app, signed with the same key, as the download on https://enhancedtraining.app. The free edition's source code is at https://github.com/ets-public/ets-public; the licensed parts aren't open source, so this build isn't made from that code alone.
+
+    Anti-features: the app sells a licence (NonFreeAdd); the optional Google Drive backup uses Google's sign-in library (NonFreeComp); a licence key is checked with our licence server (NonFreeNet). Without a licence and without Drive backup, nothing is sent anywhere.

@@ -1,0 +1,169 @@
+# Publishes the app's F-Droid repository on GitHub Pages.
+# Written by ets-web/scripts/free-release.mjs: edit it there, not here.
+#
+# The repository carries the full app: the same signed APK as the website. Protocol tracking is free; training,
+# blood tests and health unlock with a licence key in the app. (The source code in this repository is the free
+# edition only.)
+#
+# Every 6 hours it checks the licence server for a new version and rebuilds the repository when there is one.
+# The release script starts it straight after a release (with the new version number), and you can start it by
+# hand under Actions -> F-Droid repository -> Run workflow.
+# GitHub switches off scheduled runs in a public repository after 60 days without commits; the release script
+# switches it back on each time.
+# Repository secrets (set up by ETS-MENU, "Set up the F-Droid repository"):
+#   FDROID_KEYSTORE        the repository signing key (base64)
+#   FDROID_KEYSTORE_PASS   its password
+#   FDROID_LICENCE_KEY     a download-only key named "F-Droid repository (GitHub)": it can download releases but not unlock the app
+# Settings -> Pages -> Source must be "GitHub Actions".
+name: F-Droid repository
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Wait for this version on the licence server (the release script fills it in)
+        type: string
+        default: ''
+      force:
+        description: Rebuild even if the version hasn't changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fdroid-pages
+  cancel-in-progress: false
+
+env:
+  API: https://enhancedtraining.app
+  PAGES: https://ets-public.github.io/ets-public
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the secrets are set
+        env:
+          FDROID_KEYSTORE: ${{ secrets.FDROID_KEYSTORE }}
+          FDROID_KEYSTORE_PASS: ${{ secrets.FDROID_KEYSTORE_PASS }}
+          FDROID_LICENCE_KEY: ${{ secrets.FDROID_LICENCE_KEY }}
+        run: |
+          if [ -z "$FDROID_KEYSTORE" ] || [ -z "$FDROID_KEYSTORE_PASS" ] || [ -z "$FDROID_LICENCE_KEY" ]; then
+            echo "::error::The FDROID_KEYSTORE, FDROID_KEYSTORE_PASS and FDROID_LICENCE_KEY secrets must be set. Run 'Set up the F-Droid repository' in ETS-MENU."
+            exit 1
+          fi
+
+      - name: Is there a new version?
+        id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          WANT: ${{ inputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          semver='^[0-9]+\.[0-9]+\.[0-9]+$'
+          if [ -n "$WANT" ] && ! [[ "$WANT" =~ $semver ]]; then echo "::error::The version input must look like 1.2.3"; exit 1; fi
+          # a release was just published: the licence server can take a minute to show it everywhere
+          for i in $(seq 1 12); do
+            version=$(curl -fsS --retry 3 "$API/api/latest" | jq -r .version)
+            if ! [[ "$version" =~ $semver ]]; then echo "::error::The licence server returned an unexpected version"; exit 1; fi
+            if [ -z "$WANT" ] || [ "$version" = "$WANT" ]; then break; fi
+            echo "Waiting for $WANT (the server says $version)…"; sleep 15
+          done
+          if [ -n "$WANT" ] && [ "$version" != "$WANT" ]; then echo "::error::The licence server still says $version, not $WANT"; exit 1; fi
+          echo "Latest release: $version"
+          published=$(curl -fsS "$PAGES/version.txt" 2>/dev/null | tr -d '[:space:]' || true)
+          echo "In the repository: ${published:-nothing yet}"
+          if [[ "$version" == "$published" && "$FORCE" != "true" ]]; then
+            echo "Nothing new."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download the release
+        if: steps.check.outputs.publish == 'true'
+        env:
+          FDROID_LICENCE_KEY: ${{ secrets.FDROID_LICENCE_KEY }}
+        run: |
+          mkdir -p fdroid/repo
+          jq -n --arg key "$FDROID_LICENCE_KEY" '{key: $key}' |
+            curl -fsS --retry 3 -X POST -H 'content-type: application/json' --data @- "$API/api/download" -o link.json
+          url=$(jq -r .url link.json); sha=$(jq -r .sha256 link.json); v=$(jq -r .version link.json)
+          rm -f link.json
+          if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || ! [[ "$url" == "$API/api/file?"* ]]; then
+            echo "::error::The licence server's download answer wasn't what was expected"; exit 1
+          fi
+          apk="fdroid/repo/ETS-$v.apk"
+          curl -fsSL --retry 3 "$url" -o "$apk"
+          echo "$sha  $apk" | sha256sum -c -
+          echo "$v" > version.txt
+          ls -l fdroid/repo
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.publish == 'true'
+        with:
+          python-version: '3.12'
+
+      - name: Install fdroidserver
+        if: steps.check.outputs.publish == 'true'
+        # a fixed release series, so a new fdroidserver can't change how the repository is built without us knowing
+        run: pip install --quiet 'fdroidserver>=2.2,<3'
+
+      - name: Build and sign the repository index
+        if: steps.check.outputs.publish == 'true'
+        working-directory: fdroid
+        env:
+          FDROID_KEYSTORE: ${{ secrets.FDROID_KEYSTORE }}
+          FDROID_KEYSTORE_PASS: ${{ secrets.FDROID_KEYSTORE_PASS }}
+        run: |
+          umask 077
+          printf '%s' "$FDROID_KEYSTORE" | base64 -d > keystore.p12
+          chmod 600 config.yml
+          mkdir -p repo/icons && cp -n icon.png repo/icons/icon.png
+          fdroid update --verbose
+          # the repository's fingerprint, for the landing page
+          keytool -list -v -keystore keystore.p12 -storepass:env FDROID_KEYSTORE_PASS -alias repokey |
+            sed -n 's/^.*SHA256: *//p' | head -1 | tr -d ':' > ../fingerprint.txt
+          rm -f keystore.p12
+          grep -Eq '^[0-9A-F]{64}$' ../fingerprint.txt
+
+      - name: Make the Pages site
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          fp=$(cat fingerprint.txt)
+          url=$(sed -n 's/^repo_url: *//p' fdroid/config.yml)
+          host_path=${url#https://}
+          mkdir -p site
+          cp -r fdroid/repo site/repo
+          sed -e "s|__URL__|$url|g" -e "s|__HOSTPATH__|$host_path|g" -e "s|__FP__|$fp|g" fdroid/index.html > site/index.html
+          cp version.txt site/version.txt
+          touch site/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.check.outputs.publish == 'true'
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

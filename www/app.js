@@ -62,15 +62,39 @@ const num = v => { const n = parseFloat(v); return isFinite(n) ? n : NaN; };
 const toLocalInput = d => new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,16);
 const hm = s => { const [h,m] = String(s||'08:00').split(':').map(Number); return [h||0, m||0]; };
 
+/* Dose units. Amounts are stored in mg (IU is its own scale, stored as the number of IU). */
+const UNITS = {mg:[1,'mg',2], mcg:[0.001,'mcg',1], g:[1000,'g',3], iu:[1,'IU',0]};     // g keeps 3 decimals (1.125 g)
+const okUnit = u => Object.prototype.hasOwnProperty.call(UNITS, u) ? u : 'mg';
+const uF = u => UNITS[okUnit(u)][0], uL = u => UNITS[okUnit(u)][1];
 function fmtAmt(mg, unit){
   if(mg==null || !isFinite(mg)) return '';
-  if(unit==='mcg') return `${round(mg*1000,1)} mcg`;
-  return `${round(mg,2)} mg`;
+  return `${round(mg/uF(unit), UNITS[okUnit(unit)][2])} ${uL(unit)}`;
 }
 /* estimates: whole numbers once they're big enough, so they don't look more exact than they are */
-function fmtEst(mg, unit){ if(mg==null) return ''; const v = unit==='mcg' ? mg*1000 : mg; const r = v>=10 ? Math.round(v) : round(v,1); return `${r} ${unit==='mcg'?'mcg':'mg'}`; }
-function toMg(val, unit){ return unit==='mcg' ? val/1000 : val; }
-function fromMg(mg, unit){ return unit==='mcg' ? mg*1000 : mg; }
+function fmtEst(mg, unit){ if(mg==null) return ''; const v = mg/uF(unit); const r = v>=10 ? Math.round(v) : round(v,1); return `${r} ${uL(unit)}`; }
+function toMg(val, unit){ return val*uF(unit); }
+function fromMg(mg, unit){ return mg/uF(unit); }
+/* Orals and supplements: form 'oral'. strength = amount per tablet (in mg); the "volume" of a dose is a count of tablets,
+   so the vial maths (open "vial" = bottle, sizeMl/remainingMl = tablets) works unchanged. */
+const cap1 = x => x ? x[0].toUpperCase() + x.slice(1) : x;
+const isOral = c => !!c && c.form==='oral';
+/* kept in Stock for later: no schedule, reminders or doses until you start using it */
+const inProtocol = c => !!c && !c.stockOnly;
+/* supplements don't change hormone levels, so they'd only clutter lab timing and trend tags */
+const notSupp = c => !(isOral(c) && c.supplement);
+const PIECES = {tablet:['tablet','tablets'], capsule:['capsule','capsules'], softgel:['softgel','softgels'], scoop:['scoop','scoops']};
+const pieceW = (c, n) => { const p = c && Object.prototype.hasOwnProperty.call(PIECES, c.piece) ? PIECES[c.piece] : PIECES.tablet; return n===1 ? p[0] : p[1]; };
+const volUnit = (c, n) => isOral(c) ? pieceW(c, n) : 'mL';
+const contW = c => isOral(c) ? (c.piece==='scoop' ? 'tub' : 'bottle') : 'vial';
+const perDay = c => isOral(c) && c.perDay===2 ? 2 : 1;
+const takeText = (c, n) => `${round(n, 2)} ${pieceW(c, round(n, 2))}`;
+/* what a logged dose used: "0.5 mL (50 u)" for injections, "2 tablets" for orals (also for removed compounds, via log.piece) */
+function logVolText(l, c){
+  const vol = l.volumeMl ?? (l.strength ? l.dose/l.strength : null); if(!(vol>0)) return '';
+  const oc = isOral(c) ? c : l.piece ? {form:'oral', piece:l.piece} : null;
+  return oc ? takeText(oc, vol) : `${round(vol,2)} mL${vol<=1?` (${round(vol*100,1)} u)`:''}`;
+}
+const strengthText = c => isOral(c) ? `${fmtAmt(c.strength, c.unit)} per ${pieceW(c, 1)}` : `${round(c.strength,3)} mg/mL`;
 function drawText(volMl, c){
   if(!(volMl>0)) return '';
   let s = `<b>${round(volMl,2)} mL</b>`;
@@ -206,9 +230,19 @@ function migrate(){
       c.dosePerInj = (c.weeklyDose && per) ? c.weeklyDose/per : null;
     }
     delete c.days; delete c.times; delete c.weeklyDose; delete c.frequencyDays;
-    c.unit = c.unit==='mcg' ? 'mcg' : 'mg';
-    c.form = c.form==='powder' ? 'powder' : 'oil';
-    c.route = c.route==='SubQ' ? 'SubQ' : 'IM';
+    c.unit = okUnit(c.unit);
+    c.form = c.form==='powder' || c.form==='oral' ? c.form : 'oil';
+    if(c.form==='oral'){
+      c.route = 'Oral';
+      c.perDay = c.perDay===2 ? 2 : 1;
+      c.piece = Object.prototype.hasOwnProperty.call(PIECES, c.piece) ? c.piece : 'tablet';
+      c.supplement = c.supplement === true;
+    } else {
+      c.route = c.route==='SubQ' ? 'SubQ' : 'IM';
+      delete c.perDay; delete c.piece; delete c.supplement;
+      if(c.unit==='g' || c.unit==='iu') c.unit = 'mg';
+    }
+    if(c.createdAt && isNaN(Date.parse(c.createdAt))) delete c.createdAt;     // a damaged date is rebuilt below
     if(!c.createdAt){
       const first = db.logs.filter(l=>l.compoundId===c.id).map(l=>+new Date(l.date)).sort((a,b)=>a-b)[0];
       c.createdAt = new Date(Math.min(first || now, now)).toISOString();
@@ -219,7 +253,9 @@ function migrate(){
     normaliseCompound(c);
   });
   db.logs.forEach(l=>{
-    if(l.unit!=null) l.unit = l.unit==='mcg' ? 'mcg' : 'mg';
+    if(l.unit!=null) l.unit = okUnit(l.unit);
+    if(l.piece!=null && !Object.prototype.hasOwnProperty.call(PIECES, l.piece)) delete l.piece;
+    if(l.slot!==0 && l.slot!==1) delete l.slot;      // twice-daily: logged from the morning (0) or night (1) reminder
     if(l.compoundName!=null) l.compoundName = String(l.compoundName).slice(0, 80);
     const c = db.compounds.find(c=>c.id===l.compoundId);
     if(c){
@@ -229,6 +265,7 @@ function migrate(){
     }
     if(l.volumeMl==null && l.strength) l.volumeMl = l.dose / l.strength;
   });
+  if(db.settings) fixTimes(db.settings);
 }
 
 /* ================= Schedule engine ================= */
@@ -254,7 +291,17 @@ function inCycle(c, d){
 }
 /* Every field a screen relies on gets a safe shape: enums to known values, dates to YYYY-MM-DD, counts to integers.
    (Backups can be edited by hand or crafted; anything odd is dropped rather than shown.) */
-const okYmd = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(parseYmd(v));
+// a real calendar day (2026-13-45 would roll over into another date)
+const okYmd = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(parseYmd(v)) && ymd(parseYmd(v)) === v;
+/* reminder times: HH:MM, the morning from 4 am (a dose logged before 4 am counts for the night before) and the
+   night after the morning */
+const HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+function fixTimes(s){
+  if(!HM_RE.test(s.morning || '')) s.morning = '08:00';
+  if(!HM_RE.test(s.night || '')) s.night = '21:00';
+  if(s.morning < '04:00') s.morning = '04:00';
+  if(s.night <= s.morning) s.night = s.morning < '21:00' ? '21:00' : '23:59';
+}
 function normaliseCompound(c){
   c.name = String(c.name).slice(0, 80);
   const s = c.schedule;
@@ -276,7 +323,7 @@ function normaliseCompound(c){
     c.stock = (Array.isArray(c.stock) ? c.stock : []).filter(isObj).map(x=>({
       id: typeof x.id==='string' && /^[\w-]{1,40}$/.test(x.id) ? x.id : uid(),
       count: Math.min(999, Math.max(0, Math.round(+x.count) || 0)),
-      sizeMl: pos(x.sizeMl, 1000), strength: pos(x.strength, 100000), powderMg: pos(x.powderMg, 1000000),
+      sizeMl: pos(x.sizeMl, 10000), strength: pos(x.strength, 100000), powderMg: pos(x.powderMg, 1000000),
       price: pos(x.price, 1000000), expiry: okYmd(x.expiry) ? x.expiry : null, batch: typeof x.batch==='string' ? x.batch.trim().slice(0, 40) : ''
     })).filter(x=>x.powderMg || (x.sizeMl && x.strength)).slice(0, 20);
     if(!c.stock.length) delete c.stock;
@@ -288,6 +335,7 @@ function normaliseCompound(c){
     if(v.batch!=null) v.batch = String(v.batch).trim().slice(0, 40);
   } else if(c.vial!=null) c.vial = null;
   if(c.orderedAt!=null && !okYmd(c.orderedAt)) delete c.orderedAt;
+  if(c.stockOnly !== true) delete c.stockOnly;
 }
 /* The vial as entered in the compound sheet. Its "opened" time is the baseline for stock: logs before it don't touch
    the amount left. Saving without changing the vial keeps that time; entering a new amount starts it now. */
@@ -330,18 +378,20 @@ function doseOn(c, d){
 function nextDoseChange(c){ const k = ymd(new Date()); return (c.doseHistory||[]).filter(e=>e.from>k).sort((a,b)=>a.from<b.from?-1:1)[0] || null; }
 function syncDoses(){ db.compounds.forEach(c=>{ if(c.doseHistory && c.doseHistory.length) c.dosePerInj = doseOn(c, new Date()); }); }
 
+/* morning or night for a timeline entry (twice-daily compounds have a slot per dose) */
+const slotTime = (c, t) => t && t.slot===1 ? 'night' : t && t.slot===0 ? 'morning' : (c.time==='night' ? 'night' : 'morning');
 function perWeek(c){
   const s = c.schedule;
-  if(!s) return 0;
-  if(s.type==='interval') return s.every>0 ? 7/s.every : 0;
-  return (s.days||[]).length;
+  if(!s || c.stockOnly) return 0;                 // stock-only: its schedule is kept for later but nothing is planned
+  if(s.type==='interval') return s.every>0 ? 7/s.every * perDay(c) : 0;
+  return (s.days||[]).length * perDay(c);
 }
 function hasSchedule(c){ return perWeek(c) > 0; }
 
 /* Scheduled dose days for compound c between from and to (inclusive), as midnight Dates. */
 function occurrences(c, from, to){
   const out = [], s = c.schedule, a = dayStart(from), b = dayStart(to);
-  if(!s || b < a) return out;
+  if(!s || c.stockOnly || b < a) return out;
   if(s.type==='interval'){
     if(!(s.every>0) || !s.start) return out;
     // each cycle counts its doses from its own first day; outside cycles the schedule's first dose is the anchor
@@ -391,9 +441,30 @@ function timelineCalc(c, from, to){
   const scanFrom = new Date(Math.max(+created, +addDays(from, -10)));
   const occ = occurrences(c, scanFrom, to);
   const early = +addDays(scanFrom, -1);
-  const logs = (logsByCompound().get(c.id) || []).map(e=>({l:e.l, day:dayStart(e.t)})).filter(x=>+x.day >= early).sort((x,y)=>x.day-y.day);
+  // a dose logged before 4 am belongs to the day before (last night's dose, taken after midnight)
+  const logs = (logsByCompound().get(c.id) || []).map(e=>({l:e.l, day:dayStart(new Date(+e.t - 4*3600e3))})).filter(x=>+x.day >= early).sort((x,y)=>x.day-y.day || x.l.date.localeCompare(y.l.date));
   const used = new Set();
   const res = [];
+  if(perDay(c) === 2){
+    // twice a day: a log from the morning or night reminder fills that dose; others fill what's left, first log
+    // first (no early matching)
+    // a dose logged before 4 am belongs to the day before (a night dose taken after midnight)
+    const byDay = new Map();
+    logs.forEach(x=>{ const k = +dayStart(new Date(+new Date(x.l.date) - 4*3600e3)); if(!byDay.has(k)) byDay.set(k, []); byDay.get(k).push(x); });
+    occ.forEach(d=>{
+      const ls = (byDay.get(+d) || []).slice().sort((a,b)=>new Date(a.l.date)-new Date(b.l.date));
+      const slots = [null, null];
+      ls.forEach(x=>{ if((x.l.slot===0 || x.l.slot===1) && !slots[x.l.slot]) slots[x.l.slot] = x; });
+      const rest = ls.filter(x=>!slots.includes(x));
+      for(let slot=0; slot<2; slot++){
+        if(!slots[slot]) slots[slot] = rest.shift() || null;
+        const m = slots[slot];
+        const status = m ? (m.l.skipped ? 'skipped' : 'taken') : d < today ? 'missed' : +d===+today ? 'due' : 'planned';
+        if(d >= dayStart(from)) res.push({day:d, slot, status, log: m ? m.l : null});
+      }
+    });
+    return res;
+  }
   occ.forEach((d,i)=>{
     // the last dose in the range still ends where the next real dose begins (not 60 days later), so a missed dose
     // isn't matched to a much later log just because the range stops here
@@ -422,7 +493,9 @@ function statusFor(c){
   if(pz) return {label: pz.to ? `Paused until ${fmtShort(parseYmd(pz.to))}` : 'Paused', cls:'tag-muted', due:false, paused:true};
   const cy = cycleState(c);
   const tl = timeline(c, addDays(today,-60), today);
-  const todayItem = tl.find(t=>+t.day===+today);
+  const todayItems = tl.filter(t=>+t.day===+today);
+  const todayItem = todayItems.find(t=>t.status==='due') || todayItems.find(t=>t.status==='taken') || todayItems[0];
+  const twice = todayItems.length === 2, doneToday = todayItems.filter(t=>t.status==='taken' || t.status==='skipped').length;
   // missed doses since the last one taken (skipping one on purpose doesn't hide the others)
   let missed = 0; const missedDays = [];
   for(let i=tl.length-1;i>=0;i--){
@@ -439,7 +512,13 @@ function statusFor(c){
   const nextIn = next ? diffDays(next, today) : null;
   const lastOfCycle = cy && cy.state==='active' && !next;
   if(todayItem && todayItem.status==='due'){
-    return {label: missed ? `Due today · ${missed} missed` : lastOfCycle ? 'Due today · last of cycle' : `Due today · ${c.time==='night'?'night':'morning'}`, cls: missed?'tag-late':'tag-due', due:true, dueToday:true, missed, missedDays};
+    // twice a day with the morning dose done: the night one waits until later in the day
+    if(twice && doneToday===1 && !nightReady(todayItems)){
+      if(missed) return {label:`${missed} missed · night dose later`, cls:'tag-late', due:true, missed, missedDays, waitNight:true};
+      return {label:'Morning done · night later', cls:'tag-ok', due:false, waitNight:true};
+    }
+    const when = twice ? (doneToday ? (todayItems[0].status==='due' ? 'morning' : 'night') : 'morning and night') : c.time==='night' ? 'night' : 'morning';
+    return {label: missed ? `Due today · ${missed} missed` : lastOfCycle ? 'Due today · last of cycle' : `Due today · ${when}`, cls: missed?'tag-late':'tag-due', due:true, dueToday:true, missed, missedDays};
   }
   if(missed) return {label:`${missed} missed`, cls:'tag-late', due:true, missed, missedDays};
   const nextTxt = nextIn!=null ? `next in ${nextIn}d` : lastOfCycle ? 'cycle complete' : 'none planned';
@@ -451,10 +530,17 @@ function statusFor(c){
   return {label: nextIn===1 ? 'Due tomorrow' : `Due in ${nextIn}d`, cls:'tag-ok', due:false};
 }
 
+/* the night dose of a twice-daily compound can be taken 6 h after the morning one, or from 3 h before the night reminder */
+function nightReady(todayItems){
+  const first = todayItems.find(t=>t.slot===0 && t.log);
+  if(!first) return true;
+  const now = new Date(), [h,m] = hm(db.settings.night), at = new Date(now); at.setHours(h, m, 0, 0);
+  return now - new Date(first.log.date) >= 6*3600e3 || now >= new Date(+at - 3*3600e3);
+}
 function scheduleLabel(c){
   const s = c.schedule;
   if(!hasSchedule(c)) return 'No schedule';
-  const t = c.time==='night' ? 'night' : 'morning';
+  const t = perDay(c)===2 ? 'morning and night' : c.time==='night' ? 'night' : 'morning';
   if(s.type==='interval'){
     const e = s.every;
     const name = e===1 ? 'Every day' : e===2 ? 'Every other day' : `Every ${e} days`;
@@ -492,10 +578,10 @@ const stockTracked = c => stockLines(c).length > 0;
 const sealedCount = c => stockLines(c).reduce((n,x)=>n + x.count, 0);
 const isPowder = c => c.form==='powder';
 function sealedMg(c, x){ return isPowder(c) ? (+x.powderMg || 0) : (+x.sizeMl || 0) * (+x.strength || 0); }
-function lineLabel(c, x){ return isPowder(c) ? `${round(x.powderMg,3)} mg powder` : `${round(x.sizeMl,2)} mL · ${round(x.strength,3)} mg/mL`; }
-function strengthLabel(c){ return isPowder(c) ? `Powder, mixed to ${round(c.strength,3)} mg/mL` : `${round(c.strength,3)} mg/mL`; }
+function lineLabel(c, x){ return isPowder(c) ? `${round(x.powderMg,3)} mg powder` : isOral(c) ? `${round(x.sizeMl,2)} ${pieceW(c, x.sizeMl)} · ${fmtAmt(x.strength, c.unit)} each` : `${round(x.sizeMl,2)} mL · ${round(x.strength,3)} mg/mL`; }
+function strengthLabel(c){ return isPowder(c) ? `Powder, mixed to ${round(c.strength,3)} mg/mL` : strengthText(c); }
 /* totals: whole numbers with thousands separators once they're big enough */
-function fmtStock(mg, unit){ const v = unit==='mcg' ? mg*1000 : mg; const r = v>=10 ? Math.round(v) : round(v,1); return `${r.toLocaleString('en-AU')} ${unit==='mcg'?'mcg':'mg'}`; }
+function fmtStock(mg, unit){ const v = mg/uF(unit); const r = v>=10 ? Math.round(v) : round(v,1); return `${r.toLocaleString('en-AU')} ${uL(unit)}`; }
 /* expired vials don't count toward how long stock lasts, when to reorder or what it's worth */
 const notExpired = k => !k || k >= ymd(new Date());
 function onHand(c){
@@ -507,18 +593,36 @@ function onHand(c){
 }
 /* How far the stock on hand goes at the planned doses (dose changes, pauses and cycles included):
    {doses, last: date of the last dose it covers, short: date of the first dose it doesn't (null = covers all planned doses), spareMg} */
-function stockRunway(c, total = onHand(c).totalMg){
+/* stock in the order it's used: the open vial or bottle, then sealed ones soonest expiry first (see byExpiry) */
+function stockChunks(c){
+  const st = stockInfo(c), out = [];
+  if(st && notExpired(c.vial.expiry)) out.push({mg: st.rem * (+c.strength || 0), exp: c.vial.expiry || null});
+  byExpiry(stockLines(c).filter(x=>x.count > 0 && notExpired(x.expiry))).forEach(x=>out.push({mg: x.count * sealedMg(c, x), exp: x.expiry || null}));
+  return out.filter(x=>x.mg > 0);
+}
+function stockRunway(c){
   const today = dayStart(new Date());
-  const takenToday = db.logs.some(l=>l.compoundId===c.id && ymd(new Date(l.date))===ymd(today));
-  const occ = occurrences(c, takenToday ? addDays(today, 1) : today, addDays(today, 730));
+  const chunks = stockChunks(c);
+  // today's doses still to take, as the timeline sees them (a night dose logged after midnight belongs to yesterday)
+  const leftToday = timeline(c, today, today).filter(t=>t.status==='due' || t.status==='planned').length;
+  const per = perDay(c);
+  const occ = occurrences(c, today, addDays(today, 730));
   if(!occ.length) return null;
-  let left = total, n = 0, last = null;
+  // stock that expires before a dose day can't be used for it (an expiry date is the last usable day)
+  const usable = dk => chunks.filter(x=>!x.exp || x.exp >= dk);
+  const leftOn = dk => usable(dk).reduce((t,x)=>t + x.mg, 0);
+  const take = (dk, mg) => { for(const x of usable(dk)){ const u = Math.min(x.mg, mg); x.mg -= u; mg -= u; if(mg <= 1e-9) break; } };
+  let n = 0, last = null;
   for(const d of occ){
     const dose = doseOn(c, d); if(!(dose>0)) continue;
-    if(left + 1e-6 < dose) return {doses:n, last, short:d, spareMg:left};
-    left -= dose; n++; last = d;
+    const times = +d===+today ? leftToday : per;     // doses already logged today don't need stock again
+    const dk = ymd(d);
+    for(let k=0; k<times; k++){
+      if(leftOn(dk) + 1e-6 < dose) return {doses:n, last, short:d, spareMg:leftOn(dk)};
+      take(dk, dose); n++; last = d;
+    }
   }
-  return n ? {doses:n, last, short:null, spareMg:left, horizon: occ[occ.length-1]} : null;
+  return n ? {doses:n, last, short:null, spareMg:leftOn(ymd(occ[occ.length-1])), horizon: occ[occ.length-1]} : null;
 }
 function runwayText(c, r){
   if(!r) return '';
@@ -533,11 +637,13 @@ function runwayText(c, r){
   return cy && cy.state!=='done' ? `the rest of the cycle${r.spareMg>0.5 ? ` · ${fmtStock(r.spareMg, c.unit)} spare` : ''}` : '2 years or more';
 }
 /* money, in the currency symbol from Setup */
-function fmtMoney(n){
+/* money as plain text (for textContent); fmtMoney is the same, escaped for HTML */
+function moneyText(n){
   const cur = String(db.settings.currency || '$').slice(0, 4);
   const v = n >= 100 ? Math.round(n).toLocaleString('en-AU') : n.toFixed(2);
-  return esc(`${cur}${v}`);
+  return `${cur}${v}`;
 }
+function fmtMoney(n){ return esc(moneyText(n)); }
 /* cost per mg: the open vial's price if it has one, otherwise the sealed vials' average */
 function costPerMg(c){
   const v = c.vial;
@@ -550,7 +656,7 @@ function costPerMg(c){
 function weeklyMg(c){
   const today = dayStart(new Date());
   const occ = occurrences(c, today, addDays(today, 27));
-  return occ.reduce((t,d)=>t + (doseOn(c, d) || 0), 0) / 4;
+  return occ.reduce((t,d)=>t + (doseOn(c, d) || 0), 0) * perDay(c) / 4;
 }
 function costInfo(c){
   const ppm = costPerMg(c); if(ppm==null) return null;
@@ -625,7 +731,7 @@ function renderPromo(kind){
   return `<div class="card promo"><div class="alert-code">${premiumOn() ? '' : 'WITH A LICENCE'}</div>
     <h3 style="margin:6px 0 6px">${esc(p.title)}</h3><p class="small" style="margin:0 0 10px">${esc(p.lead)}</p>
     <ul class="promo-list">${p.points.map(t=>`<li>${esc(t)}</li>`).join('')}</ul>${premiumCta()}</div>
-    <p class="small muted" style="margin:10px 2px">Injections, reminders, levels, the doctor report and backups are free. A licence adds training, blood tests and health.</p>`;
+    <p class="small muted" style="margin:10px 2px">Your protocol (injections, orals and supplements), reminders, levels, the doctor report and backups are free. A licence adds training, blood tests and health.</p>`;
 }
 
 function premiumCta(){
@@ -666,7 +772,7 @@ function notifCardHtml(){
     </div>
     <div class="switch-row" style="border-top:1px solid var(--hair)"><div><div class="list-title">Private reminders</div><div class="list-sub">Say "Reminder" without compound names or doses</div></div>
       <label class="switch"><input type="checkbox" id="setPrivNotif" ${s.privateNotifs?'checked':''} aria-label="Private reminders"><span></span></label></div>
-    <div class="switch-row" style="border-top:1px solid var(--hair)"><div><div class="list-title">Stock and planning</div><div class="list-sub">When to reorder, vials about to expire${''}</div></div>
+    <div class="switch-row" style="border-top:1px solid var(--hair)"><div><div class="list-title">Stock and planning</div><div class="list-sub">When to reorder, stock about to expire${''}</div></div>
       <label class="switch"><input type="checkbox" id="setPlanNotif" ${s.planNotifs!==false?'checked':''} aria-label="Stock and planning reminders"><span></span></label></div>
     <div class="switch-row" style="border-top:1px solid var(--hair)"><div><div class="list-title">Check-in reminder</div><div class="list-sub">At your night time, on days you haven't checked in</div></div>
       <label class="switch"><input type="checkbox" id="setCiRem" ${s.checkinRemind?'checked':''} aria-label="Check-in reminder"><span></span></label></div>
@@ -727,6 +833,8 @@ function render(){
   _tlCache.clear(); _loadMap = null; _logIdx = null; _labTestsCache = null;
   syncDoses();
   if(!FIRST_TAB[ui.mode]) ui.mode = 'inj';
+  // however you arrive in Training (a licence just activated, a reminder, a started workout), the starters are there
+  
   if(ui.tab!=='app' && !tabsFor(ui.mode).some(t=>t[0]===ui.tab)) ui.tab = FIRST_TAB[ui.mode];
   renderTabbar();
   $('#pageTitle').textContent = TAB_META[ui.tab].title;
@@ -740,31 +848,31 @@ function render(){
     html = renderPromo(kind);
   } else if(ui.tab==='today'){
     sub.textContent = fmtDate(new Date()).replace(/,/g,'');
-    const sts = db.compounds.map(statusFor);
+    const sts = db.compounds.filter(inProtocol).map(statusFor);
     const due = sts.filter(x=>x.dueToday).length, missed = sts.reduce((n,x)=>n+(x.missed||0),0);
-    $('#pageTitle').textContent = !db.compounds.length ? 'Get started' : due ? `${due} due today` : missed ? `${missed} missed` : 'All clear';
+    $('#pageTitle').textContent = !db.compounds.some(inProtocol) ? 'Get started' : due ? `${due} due today` : missed ? `${missed} missed` : 'All clear';
     if(missed && due){ meta.textContent = `${missed} missed`; meta.style.color = 'var(--signal)'; }
-    else { const n = db.compounds.filter(c=>{ const cy = cycleState(c); return !cy || cy.state!=='done'; }).length; meta.textContent = n ? `${n} active` : ''; meta.style.color = ''; }
+    else { const n = db.compounds.filter(c=>{ const cy = cycleState(c); return inProtocol(c) && (!cy || cy.state!=='done'); }).length; meta.textContent = n ? `${n} active` : ''; meta.style.color = ''; }
     html = renderToday();
-    if(db.compounds.length){ top.hidden=false; top.dataset.action='log'; top.innerHTML = PLUS + '<span>Log</span>'; top.setAttribute('aria-label','Log injection'); }
+    if(db.compounds.some(inProtocol)){ top.hidden=false; top.dataset.action='log'; top.innerHTML = PLUS + '<span>Log</span>'; top.setAttribute('aria-label','Log a dose'); }
   } else if(ui.tab==='calendar'){
     sub.textContent = 'Taken · missed · planned';
     html = renderCalendar();
   } else if(ui.tab==='history'){
-    sub.textContent = 'Injection log'; meta.textContent = `${String(db.logs.length).padStart(3,'0')} entries`;
+    sub.textContent = 'Dose log'; meta.textContent = `${String(db.logs.length).padStart(3,'0')} entries`;
     html = renderHistory();
-    if(db.compounds.length){ top.hidden=false; top.dataset.action='log'; top.innerHTML = PLUS + '<span>Log</span>'; top.setAttribute('aria-label','Log injection'); }
+    if(db.compounds.some(inProtocol)){ top.hidden=false; top.dataset.action='log'; top.innerHTML = PLUS + '<span>Log</span>'; top.setAttribute('aria-label','Log a dose'); }
   } else if(ui.tab==='stock'){
-    sub.textContent = 'Vials on hand';
+    sub.textContent = 'On hand';
     const n = db.compounds.reduce((t,c)=>t + sealedCount(c), 0);
     meta.textContent = n ? `${n} sealed` : '';
     html = renderStock();
-    if(db.compounds.length){ top.hidden=false; top.dataset.action='stock-add'; top.innerHTML = PLUS + '<span>Add</span>'; top.setAttribute('aria-label','Add vials to stock'); }
+    if(db.compounds.length){ top.hidden=false; top.dataset.action='stock-add'; top.innerHTML = PLUS + '<span>Add</span>'; top.setAttribute('aria-label','Add stock'); }
   } else if(ui.tab==='app'){
     sub.textContent = 'Notifications · lock · backup';
     html = renderAppSettings();
   } else {
-    sub.textContent = ui.mode==='train' ? 'Training · exercises · import' : ui.mode==='health' ? 'Heart rate · Health Connect' : 'Compounds · vial stock';
+    sub.textContent = ui.mode==='train' ? 'Training · exercises · import' : ui.mode==='health' ? 'Heart rate · Health Connect' : 'Compounds · stock · check-in';
     html = (renderSetup()) + appSettingsLink();
   }
   
@@ -830,8 +938,8 @@ function syringeSvg(c, volMl, alert){
 }
 function renderToday(){
   const webTop = webInstallHtml();
-  if(!db.compounds.length){
-    return webTop + `<div class="card"><div class="empty">No compounds yet.<br><br>
+  if(!db.compounds.some(inProtocol)){
+    return webTop + `<div class="card"><div class="empty">Nothing in your protocol yet.${db.compounds.length ? ' Things you keep for later are in the Stock tab.' : ''}<br><br>
       <button class="btn" data-action="compound-add">Add a compound</button></div></div>`;
   }
   let html = webTop + calNudgeHtml();
@@ -842,12 +950,13 @@ function renderToday(){
       <button class="btn btn-outline" data-action="${isNative?'backup-now':'export'}">Back up now</button></div>`;
   }
   db.compounds.forEach(c=>{
-    const s = stockInfo(c);
+    const s = inProtocol(c) ? stockInfo(c) : null;
     if(s && s.low){
       const tracked = stockTracked(c), n = sealedCount(c), last = tracked && !n;
-      html += `<div class="alert"><span class="alert-code">${last ? 'LAST VIAL' : 'VIAL LOW'} · ${esc(c.name.toUpperCase())}</span>
-        <div>${round(s.rem,2)} mL left${s.dosesLeft!==null?`, about <b>${s.dosesLeft} ${s.dosesLeft===1?'dose':'doses'}</b>`:''}.${tracked ? (n ? ` ${n} sealed ${n===1?'vial':'vials'} in Stock.` : ' <b>No sealed vials left</b> in Stock.') : ''}</div>
-        <div class="foot-btns">${last ? `<button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add vials</button>` : ''}<button class="btn btn-outline" data-action="vial-new" data-id="${esc(c.id)}">${last ? 'New vial' : 'Start new vial'}</button></div></div>`;
+      const cw = contW(c), CW = cw.toUpperCase();
+      html += `<div class="alert"><span class="alert-code">${last ? `LAST ${CW}` : `${CW} LOW`} · ${esc(c.name.toUpperCase())}</span>
+        <div>${round(s.rem,2)} ${esc(volUnit(c, round(s.rem,2)))} left${s.dosesLeft!==null?`, about <b>${s.dosesLeft} ${s.dosesLeft===1?'dose':'doses'}</b>`:''}.${tracked ? (n ? ` ${n} sealed ${n===1?cw:cw+'s'} in Stock.` : ` <b>No sealed ${cw}s left</b> in Stock.`) : ''}</div>
+        <div class="foot-btns">${last ? `<button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add ${cw}s</button>` : ''}<button class="btn btn-outline" data-action="vial-new" data-id="${esc(c.id)}">${last ? `New ${cw}` : `Start new ${cw}`}</button></div></div>`;
     }
   });
   db.compounds.forEach(c=>{
@@ -856,40 +965,42 @@ function renderToday(){
       const r = ro.runway;
       html += `<div class="alert"><span class="alert-code">REORDER · ${esc(c.name.toUpperCase())}</span>
         <div>${r.doses ? `Your stock lasts until <b>${esc(fmtShortY(r.last))}</b> (${r.doses} ${r.doses===1?'dose':'doses'}).` : '<b>Not enough stock</b> for the next dose.'} Delivery takes about ${leadDays()} days.</div>
-        <div class="foot-btns"><button class="btn btn-outline" data-action="stock-ordered" data-id="${esc(c.id)}">I’ve ordered</button><button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add vials</button></div></div>`;
+        <div class="foot-btns"><button class="btn btn-outline" data-action="stock-ordered" data-id="${esc(c.id)}">I’ve ordered</button><button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add ${contW(c)}s</button></div></div>`;
     }
     const ex = expiringSoon(c);
     if(ex.length){
       const e = ex[0], more = ex.length - 1;
       html += `<div class="alert"><span class="alert-code">${diffDays(parseYmd(e.expiry), dayStart(new Date()))<0 ? 'EXPIRED' : 'EXPIRES SOON'} · ${esc(c.name.toUpperCase())}</span>
-        <div>${e.open ? 'Your open vial' : `${e.count} sealed ${e.count===1?'vial':'vials'}`}${e.batch ? ` (batch ${esc(e.batch)})` : ''} ${esc(expText(e.expiry))}${more ? `, and ${more} more ${more===1?'batch':'batches'} soon after` : ''}.</div>
+        <div>${e.open ? `Your open ${contW(c)}` : `${e.count} sealed ${e.count===1?contW(c):contW(c)+'s'}`}${e.batch ? ` (batch ${esc(e.batch)})` : ''} ${esc(expText(e.expiry))}${more ? `, and ${more} more ${more===1?'batch':'batches'} soon after` : ''}.</div>
         <div class="foot-btns"><button class="btn btn-outline" data-action="go-stock">Open Stock</button></div></div>`;
     }
   });
   
   html += checkinCardHtml();
-  const withStatus = db.compounds.map(c=>({c, st:statusFor(c)}));
+  const withStatusAll = db.compounds.filter(inProtocol).map(c=>({c, st:statusFor(c)}));
+  const supps = withStatusAll.filter(x=>isOral(x.c) && x.c.supplement && !x.st.finished);
+  const withStatus = withStatusAll.filter(x=>!supps.includes(x));
   const due = withStatus.filter(x=>x.st.due), rest = withStatus.filter(x=>!x.st.due && !x.st.finished), done = withStatus.filter(x=>x.st.finished);
   const full = ({c, st})=>{
-    const pv = plannedVol(c), stock = stockInfo(c), site = suggestSite(c.route, c);
-    const unitsTxt = pv && pv<=1 ? `${round(pv*100,1)} u` : (pv ? `${round(pv,2)} mL` : '—');
+    const oral = isOral(c), pv = plannedVol(c), stock = stockInfo(c), site = oral ? '' : suggestSite(c.route, c);
+    const unitsTxt = oral ? (pv ? takeText(c, pv) : '—') : pv && pv<=1 ? `${round(pv*100,1)} u` : (pv ? `${round(pv,2)} mL` : '—');
     return `<div class="dose">
       <div class="dose-head">
         <div><div class="dose-name">${esc(c.name)}</div><div class="dose-sched">${esc(scheduleLabel(c))}${doseChangeNote(c)}${cycleNote(c)}</div></div>
         <span class="tag ${st.cls}">${esc(st.label)}</span>
       </div>
-      ${st.missedDays && st.missedDays.length ? (()=>{ const d = st.missedDays[0]; const more = st.missedDays.length-1;
-        return `<div class="missed-row"><div><span class="alert-code">MISSED</span> ${esc(fmtDate(parseYmd(d)))}${more?` <span class="muted">+${more} earlier</span>`:''}</div>
-          <div class="foot-btns">${more ? `<button class="btn btn-outline" data-action="skip-all" data-id="${esc(c.id)}">Skip all ${more+1}</button>` : `<button class="btn btn-outline" data-action="skip" data-id="${esc(c.id)}" data-day="${esc(d)}">Skip it</button>`}<button class="btn btn-outline" data-action="log" data-id="${esc(c.id)}" data-day="${esc(d)}">Log late</button></div></div>`; })() : ''}
-      ${pv ? syringeSvg(c, pv, !!st.missed) : `<div class="small muted">Set a planned dose (Setup) to see the draw on the syringe.</div>`}
+      ${st.missedDays && st.missedDays.length ? (()=>{ const uniq = [...new Set(st.missedDays)], d = uniq[0], moreDays = uniq.length-1, n = st.missedDays.length;
+        return `<div class="missed-row"><div><span class="alert-code">MISSED</span> ${esc(fmtDate(parseYmd(d)))}${n > uniq.length ? ` <span class="muted">${n} doses</span>` : ''}${moreDays?` <span class="muted">+${moreDays} earlier ${moreDays===1?'day':'days'}</span>`:''}</div>
+          <div class="foot-btns">${n > 1 ? `<button class="btn btn-outline" data-action="skip-all" data-id="${esc(c.id)}">Skip all ${n}</button>` : `<button class="btn btn-outline" data-action="skip" data-id="${esc(c.id)}" data-day="${esc(d)}">Skip it</button>`}<button class="btn btn-outline" data-action="log" data-id="${esc(c.id)}" data-day="${esc(d)}">Log late</button></div></div>`; })() : ''}
+      ${oral ? '' : pv ? syringeSvg(c, pv, !!st.missed) : `<div class="small muted">Set a planned dose (Setup) to see the draw on the syringe.</div>`}
       <div class="readout">
         <div><span>Dose</span><span>${c.dosePerInj ? fmtAmt(c.dosePerInj, c.unit) : '—'}</span></div>
-        <div><span>Draw</span><span>${unitsTxt}</span></div>
-        <div><span>Site</span><span>${esc(site)}</span></div>
+        <div><span>${oral ? 'Take' : 'Draw'}</span><span>${esc(unitsTxt)}</span></div>
+        <div><span>${oral ? 'When' : 'Site'}</span><span>${oral ? (perDay(c)===2 ? 'AM + PM' : c.time==='night' ? 'Night' : 'Morning') : esc(site)}</span></div>
       </div>
       <div class="dose-foot">
-        <span class="vial-line ${stock&&stock.low?'low':''}">${stock ? `Vial ${round(stock.rem,2)} / ${c.vial.sizeMl} mL${stock.dosesLeft!==null?` · ≈${stock.dosesLeft} doses`:''}${stockTracked(c)?` · +${sealedCount(c)} sealed`:''}` : (pv ? `${round(pv,2)} mL${c.barrel?' · '+esc(c.barrel)+' syringe':''}` : '')}</span>
-        <div class="foot-btns"><button class="btn btn-outline" data-action="skip" data-id="${esc(c.id)}">Skip</button><button class="btn" data-action="log" data-id="${esc(c.id)}">Log dose</button></div>
+        <span class="vial-line ${stock&&stock.low?'low':''}">${stock ? `${cap1(contW(c))} ${round(stock.rem,2)} / ${round(c.vial.sizeMl,2)} ${esc(volUnit(c, 2))}${stock.dosesLeft!==null?` · ≈${stock.dosesLeft} doses`:''}${stockTracked(c)?` · +${sealedCount(c)} sealed`:''}` : (oral ? '' : pv ? `${round(pv,2)} mL${c.barrel?' · '+esc(c.barrel)+' syringe':''}` : '')}</span>
+        <div class="foot-btns">${st.waitNight ? `<span class="small muted">Tonight's dose later</span>` : `<button class="btn btn-outline" data-action="skip" data-id="${esc(c.id)}">Skip</button><button class="btn" data-action="log" data-id="${esc(c.id)}">Log dose</button>`}</div>
       </div>
     </div>`;
   };
@@ -898,24 +1009,43 @@ function renderToday(){
     return `<div class="dose compact-wrap">
       <div class="dose compact">
         <div class="grow"><div class="dose-name">${esc(c.name)}</div>
-          <div class="dose-sched">${c.dosePerInj?fmtAmt(c.dosePerInj,c.unit)+' · ':''}${pv&&pv<=1?round(pv*100,1)+' u · ':''}${esc(scheduleLabel(c))}${doseChangeNote(c)}${cycleNote(c)}</div>
+          <div class="dose-sched">${c.dosePerInj?fmtAmt(c.dosePerInj,c.unit)+' · ':''}${isOral(c) ? (pv ? esc(takeText(c, pv))+' · ' : '') : pv&&pv<=1?round(pv*100,1)+' u · ':''}${esc(scheduleLabel(c))}${doseChangeNote(c)}${cycleNote(c)}</div>
           <div style="margin-top:8px"><span class="tag ${st.cls}">${esc(st.label)}</span></div></div>
         <button class="btn btn-outline" data-action="log" data-id="${esc(c.id)}" aria-label="Log ${esc(c.name)}">Log</button>
       </div>
-      ${pv && !st.paused ? `<div class="scale-slim">${syringeSvg(c, pv, false)}</div>` : ''}
+      ${pv && !st.paused && !isOral(c) ? `<div class="scale-slim">${syringeSvg(c, pv, false)}</div>` : ''}
     </div>`;
   };
+  // supplements: one compact checklist, ticked off in a tap
+  const suppHtml = ()=>{
+    if(!supps.length) return '';
+    const dueS = supps.filter(x=>x.st.dueToday);
+    const today = dayStart(new Date());
+    const doneToday = c => { const t = timeline(c, today, today); return t.length > 0 && t.every(x=>x.status==='taken' || x.status==='skipped'); };
+    const doneN = supps.filter(x=>doneToday(x.c)).length, todayN = supps.filter(x=>x.st.dueToday || x.st.waitNight || doneToday(x.c)).length;
+    return `<div class="section-label">Supplements${todayN ? ` · ${doneN} of ${todayN} done` : ''}</div><div class="card supp-card">${supps.map(({c, st})=>{
+      const pv = plannedVol(c);
+      // missed doses have their own line below, so the status here doesn't repeat the count
+      const label = st.missed ? (st.dueToday ? 'Due today' : st.waitNight ? 'Night dose later' : '') : st.label;
+      return `<div class="list-item supp-row">
+        <div class="list-main tap-row" data-action="log" data-id="${esc(c.id)}" aria-label="${esc(`Log ${c.name}${label ? `, ${label}` : ''}`)}"><div class="list-title">${esc(c.name)}</div>
+          <div class="list-sub">${[c.dosePerInj ? esc(fmtAmt(c.dosePerInj, c.unit)) : '', pv ? esc(takeText(c, pv)) : '', perDay(c)===2 ? 'twice a day' : '', label ? esc(label) : ''].filter(Boolean).join(' · ')}</div></div>
+        ${st.dueToday ? `<button class="btn supp-take" data-action="supp-take" data-id="${esc(c.id)}" aria-label="${esc(`Take ${c.name}`)}">Take</button>` : st.waitNight ? `<span class="supp-later small muted">Tonight</span>` : doneToday(c) ? `<span class="supp-ok" role="img" aria-label="Done">✓</span>` : ''}
+      </div>${st.missed ? `<div class="supp-missed small"><span class="trend-up">${st.missed} missed</span><button type="button" class="chip-btn" data-action="log" data-id="${esc(c.id)}" data-day="${esc(st.missedDays[0])}">Log late</button><button type="button" class="chip-btn" data-action="skip-all" data-id="${esc(c.id)}">Skip missed</button></div>` : ''}`; }).join('')}
+      ${dueS.length > 1 ? `<button class="btn btn-block" data-action="supp-all" style="margin-top:10px">Take all ${dueS.length}</button>` : ''}</div>`;
+  };
   if(due.length) html += `<div class="section-label">Due now</div>${due.map(full).join('')}`;
+  html += suppHtml();
   if(rest.length) html += `<div class="section-label">${due.length?'Coming up':'Schedule'}</div>${rest.map(compact).join('')}`;
   if(done.length) html += `<div class="section-label">Finished cycles</div><div class="card">${done.map(({c})=>{ const cy = cycleState(c);
       return `<div class="list-item"><div class="list-main"><div class="list-title">${esc(c.name)}</div>
         <div class="list-sub">${esc(cycleLengthText(c.cycle))} · ${esc(fmtShort(parseYmd(cy.start)))} – ${esc(fmtShort(parseYmd(cy.lastDay)))}</div></div>
         <button class="btn btn-outline" data-action="cycle-next" data-id="${esc(c.id)}">New cycle</button></div>`; }).join('')}</div>`;
 
-  const hl = db.compounds.filter(c=>c.halfLife>0);
+  const hl = db.compounds.filter(c=>c.halfLife>0 && inProtocol(c));
   html += `<div class="section-label">Estimated levels</div>`;
   if(!hl.length){
-    html += `<div class="card"><div class="empty small">Add a compound's half-life to see roughly how much is active over time.${db.compounds.length ? `<br><br><button class="btn btn-outline" data-action="compound-edit" data-id="${esc(db.compounds[0].id)}">Add half-life to ${esc(db.compounds[0].name)}</button>` : ''}</div></div>`;
+    html += `<div class="card"><div class="empty small">Add a compound's half-life to see roughly how much is active over time.${(()=>{ const c0 = db.compounds.find(c=>inProtocol(c) && !(isOral(c) && c.supplement)); return c0 ? `<br><br><button class="btn btn-outline" data-action="compound-edit" data-id="${esc(c0.id)}">Add half-life to ${esc(c0.name)}</button>` : ''; })()}</div></div>`;
     const fs = feelSvg();
     if(fs) html += `<div class="section-label">How you've felt</div><div class="card">${fs}</div>`;
   } else {
@@ -939,11 +1069,18 @@ function doseChangeNote(c){
   return n ? ` · ${esc(fmtAmt(n.dose, c.unit))} from ${esc(fmtShort(parseYmd(n.from)))}` : '';
 }
 /* Record a dose as skipped on purpose (covers that scheduled dose; no volume used). */
-function skipDose(cid, dayKey){
+function skipDose(cid, dayKey, slot){
   const c = db.compounds.find(c=>c.id===cid); if(!c) return;
   const today = ymd(new Date());
   const when = dayKey && dayKey!==today ? (()=>{ const d = parseYmd(dayKey); d.setHours(12,0,0,0); return d; })() : new Date();
-  const log = {id:uid(), compoundId:c.id, compoundName:c.name, skipped:true, dose:0, unit:c.unit, volumeMl:0, date:when.toISOString(), site:null, notes:''};
+  // twice a day: skip the dose asked for, or the first one still open that day (not tonight's by accident)
+  let sl = {};
+  if(perDay(c)===2){
+    const k = dayKey || ymd(new Date(+when - 4*3600e3)), d = parseYmd(k);
+    const s = slot===0 || slot===1 ? slot : (timeline(c, d, d).find(t=>t.status!=='taken' && t.status!=='skipped') || {}).slot;
+    if(s===0 || s===1) sl = {slot:s};
+  }
+  const log = {id:uid(), compoundId:c.id, compoundName:c.name, skipped:true, dose:0, unit:c.unit, volumeMl:0, date:when.toISOString(), site:null, notes:'', ...sl};
   db.logs.push(log); save(); render(); haptic();
   toast(`${c.name} marked skipped`, {label:'Undo', fn:()=>{ db.logs = db.logs.filter(l=>l.id!==log.id); save(); render(); toast('Undone'); }});
 }
@@ -970,10 +1107,10 @@ function levelSeries(c, weeks){
   // projected doses from the schedule, using the planned dose in effect on each day
   const proj = [];
   if(hasSchedule(c)){
-    const [h,m] = hm(c.time==='night' ? db.settings.night : db.settings.morning);
     timeline(c, dayStart(now), new Date(end)).forEach(t=>{
       if(t.status==='taken' || t.status==='skipped') return;
       const mg = doseOn(c, t.day); if(!(mg>0)) return;
+      const [h,m] = hm(slotTime(c, t)==='night' ? db.settings.night : db.settings.morning);
       const at = new Date(t.day); at.setHours(h,m,0,0);
       proj.push({t: Math.max(+at, now), mg});
     });
@@ -1013,9 +1150,9 @@ function paintLevels(cv, c, weeks, W, H, dpr, col, MONO){
   for(let i=0;i<=4;i++){
     const v = maxV*i/4, yy = Math.round(y(v))+0.5;
     g.beginPath(); g.moveTo(pad.l, yy); g.lineTo(W-pad.r, yy); g.stroke();
-    g.fillText(fmtAmt(v, unit).replace(/ (mg|mcg)$/, ''), pad.l-6, yy);
+    g.fillText(fmtAmt(v, unit).replace(/ (mg|mcg|g|IU)$/, ''), pad.l-6, yy);
   }
-  g.textAlign='right'; g.textBaseline='alphabetic'; g.fillText(unit, pad.l-6, 12); g.textBaseline='middle';
+  g.textAlign='right'; g.textBaseline='alphabetic'; g.fillText(uL(unit), pad.l-6, 12); g.textBaseline='middle';
   // x labels weekly
   g.textAlign='center'; g.textBaseline='alphabetic';
   if(weeks >= 40){
@@ -1117,8 +1254,8 @@ function calendarItems(from, to){
   const matched = new Set();
   db.compounds.forEach(c=>{
     timeline(c, from, to).forEach(t=>{
-      if(t.log){ matched.add(t.log.id); push(t.log.date, {c, status:t.status, log:t.log, day:t.day}); }
-      else push(t.day, {c, status:t.status, day:t.day});
+      if(t.log){ matched.add(t.log.id); push(t.log.date, {c, status:t.status, log:t.log, day:t.day, slot:t.slot}); }
+      else push(t.day, {c, status:t.status, day:t.day, slot:t.slot});
     });
   });
   db.logs.forEach(l=>{
@@ -1177,9 +1314,9 @@ function renderCalendar(){
     } else {
       const pill = it.status==='missed' ? '<span class="tag tag-late">Missed</span>' : it.status==='due' ? '<span class="tag tag-due">Due</span>' : '<span class="tag tag-muted">Planned</span>';
       const canLog = it.c && it.day <= today;
-      html += `<div class="list-item"><div class="list-main"><div class="list-title">${esc(name)}</div>
-        <div class="list-sub">${esc(it.c?scheduleLabel(it.c):'')}</div></div>
-        ${pill}${canLog?` <button class="btn btn-tonal" data-action="log" data-id="${esc(it.c.id)}" data-day="${ymd(it.day)}" aria-label="Log ${esc(it.c.name)}">Log</button>`:''}${canLog && it.status!=='planned'?` <button class="btn btn-outline" data-action="skip" data-id="${esc(it.c.id)}" data-day="${ymd(it.day)}">Skip</button>`:''}</div>`;
+      html += `<div class="list-item cal-item"><div class="list-main"><div class="list-title">${esc(name)}</div>
+        <div class="list-sub">${it.slot!=null ? `${it.slot ? 'Night' : 'Morning'} dose of 2` : esc(it.c?scheduleLabel(it.c):'')}</div></div>
+        <div class="cal-acts">${pill}${canLog?` <button class="btn btn-tonal" data-action="log" data-id="${esc(it.c.id)}" data-day="${ymd(it.day)}"${it.slot!=null ? ` data-slot="${it.slot}"` : ''} aria-label="Log ${esc(it.c.name)}">Log</button>`:''}${canLog && it.status!=='planned'?` <button class="btn btn-outline" data-action="skip" data-id="${esc(it.c.id)}" data-day="${ymd(it.day)}"${it.slot!=null ? ` data-slot="${it.slot}"` : ''}>Skip</button>`:''}</div></div>`;
     }
   });
   html += `</div>`;
@@ -1198,12 +1335,12 @@ function renderHistory(){
   const hasRemoved = db.logs.some(l=>!ids.has(l.compoundId));
   let html = `<div class="chips">
     <button class="chip ${ui.histFilter==='all'?'active':''}" data-action="hist-filter" data-f="all">All</button>
-    ${db.compounds.map(c=>`<button class="chip ${ui.histFilter===c.id?'active':''}" data-action="hist-filter" data-f="${esc(c.id)}">${esc(c.name)}</button>`).join('')}
+    ${db.compounds.filter(c=>inProtocol(c) || db.logs.some(l=>l.compoundId===c.id)).map(c=>`<button class="chip ${ui.histFilter===c.id?'active':''}" data-action="hist-filter" data-f="${esc(c.id)}">${esc(c.name)}</button>`).join('')}
     ${hasRemoved?`<button class="chip ${ui.histFilter==='removed'?'active':''}" data-action="hist-filter" data-f="removed">Removed</button>`:''}
   </div>`;
   const list = db.logs.filter(l=> ui.histFilter==='all' || (ui.histFilter==='removed' ? !ids.has(l.compoundId) : l.compoundId===ui.histFilter))
     .slice().sort((a,b)=>+new Date(b.date) - +new Date(a.date));
-  if(!list.length) return html + `<div class="card"><div class="empty">No injections logged yet.</div></div>` + reportBtnHtml();
+  if(!list.length) return html + `<div class="card"><div class="empty">Nothing logged yet.</div></div>` + reportBtnHtml();
   const byId = {}; db.compounds.forEach(c=>{ byId[c.id] = c; });
   const limit = ui.ihLimit || 60;
   let lastDay = null, open = false;
@@ -1211,23 +1348,23 @@ function renderHistory(){
     const c = byId[l.compoundId];
     const day = fmtDate(l.date);
     if(day!==lastDay){ if(open) html += '</div>'; html += `<div class="day-label">${esc(day)}</div><div class="card">`; open = true; lastDay = day; }
-    const vol = l.volumeMl ?? (l.strength ? l.dose/l.strength : null);
+    const vt = logVolText(l, c);
     html += `<div class="list-item tap-row" data-action="log-edit" data-id="${esc(l.id)}">
       <div class="list-main"><div class="list-title">${esc(c ? c.name : (l.compoundName || 'Removed compound'))}</div>
-        <div class="list-sub mono">${fmtTime(l.date)}${vol?` · ${round(vol,2)} mL${vol<=1?` (${round(vol*100,1)} u)`:''}`:''}${l.site?' · '+esc(l.site):''}</div>
+        <div class="list-sub mono">${fmtTime(l.date)}${vt?` · ${esc(vt)}`:''}${l.site?' · '+esc(l.site):''}</div>
         ${l.notes?`<div class="list-note">${esc(l.notes)}</div>`:''}
       </div>
       <div class="list-right">${l.skipped ? '<span class="tag tag-muted">Skipped</span>' : `<div class="big">${fmtAmt(l.dose, l.unit || (c&&c.unit))}</div>`}</div>
     </div>`;
   });
   if(open) html += '</div>';
-  if(list.length > limit) html += `<button class="btn btn-outline btn-block" data-action="ih-more">Show older injections (${list.length - limit} more)</button>`;
+  if(list.length > limit) html += `<button class="btn btn-outline btn-block" data-action="ih-more">Show older doses (${list.length - limit} more)</button>`;
   return html + reportBtnHtml();
 }
 /* The doctor report lives under History in both editions */
 function reportBtnHtml(){
   if(!db.compounds.length) return '';
-  return `<div class="section-label">Doctor report</div><div class="card"><p class="small muted" style="margin:0 0 10px">A PDF of your regimen, adherence, estimated levels${premiumOn() ? ', blood tests' : ''} and injection log, to share with your doctor.</p>
+  return `<div class="section-label">Doctor report</div><div class="card"><p class="small muted" style="margin:0 0 10px">A PDF of your regimen, adherence, estimated levels${premiumOn() ? ', blood tests' : ''} and dose log, to share with your doctor.</p>
     <button class="btn btn-block" data-action="report">Create doctor report</button></div>`;
 }
 
@@ -1249,7 +1386,7 @@ function labTestsCalc(){
 /* Test time unknown: count whole days, and say "same day as" when a dose was logged that day (before or after is unknown). */
 function labTimingDays(at, onlyCompound){
   const day = dayStart(at), end = +addDays(day, 1);
-  const list = (onlyCompound ? [onlyCompound] : db.compounds).map(c=>{
+  const list = (onlyCompound ? [onlyCompound] : db.compounds.filter(notSupp)).map(c=>{
     const a = (logsByCompound().get(c.id) || []).filter(e=>!e.l.skipped && e.t < end);
     const last = a[a.length-1]; if(!last) return null;
     const d = diffDays(day, dayStart(last.t));
@@ -1270,7 +1407,7 @@ function logsByCompound(){
 function labTimingText(at, onlyCompound){
   if(at && at.approx) return labTimingDays(at, onlyCompound);
   const lim = +at;
-  const list = (onlyCompound ? [onlyCompound] : db.compounds).map(c=>{
+  const list = (onlyCompound ? [onlyCompound] : db.compounds.filter(notSupp)).map(c=>{
     const a = logsByCompound().get(c.id) || [];
     let lo = 0, hi = a.length - 1, idx = -1;          // last log at or before `at`
     while(lo <= hi){ const mid = (lo+hi) >> 1; if(a[mid].t <= lim){ idx = mid; lo = mid+1; } else hi = mid-1; }
@@ -1300,20 +1437,24 @@ function labFlagTag(r){ return r && r.flag ? `<span class="tag tag-late" title="
 function renderSetup(){
   const s = db.settings;
   let html = `<div class="section-label">Compounds</div><div class="card">`;
-  if(!db.compounds.length) html += `<div class="empty small">No compounds added.</div>`;
-  db.compounds.forEach(c=>{
+  if(!db.compounds.some(inProtocol)) html += `<div class="empty small">No compounds in your protocol.</div>`;
+  db.compounds.filter(inProtocol).forEach(c=>{
     const stock = stockInfo(c);
     html += `<div class="list-item tap-row" data-action="compound-edit" data-id="${esc(c.id)}">
       <div class="list-main"><div class="list-title">${esc(c.name)}</div>
-      <div class="list-sub">${round(c.strength,3)} mg/mL${c.form==='powder'?' (reconstituted)':''} · ${c.route} · ${esc(scheduleLabel(c))}</div>
-      <div class="list-sub">${currentPause(c)?'<b>Paused</b> · ':''}${c.dosePerInj?fmtAmt(c.dosePerInj,c.unit)+' per injection':'No planned dose'}${doseChangeNote(c)}${cycleNote(c)}${stock?` · ${round(stock.rem,2)}/${c.vial.sizeMl} mL in vial`:''}${c.halfLife?` · t½ ${c.halfLife}d`:''}</div></div>
+      <div class="list-sub">${esc(strengthText(c))}${c.form==='powder'?' (reconstituted)':''} · ${isOral(c) ? (c.supplement ? 'Supplement' : 'Oral') : c.route} · ${esc(scheduleLabel(c))}</div>
+      <div class="list-sub">${currentPause(c)?'<b>Paused</b> · ':''}${c.dosePerInj?fmtAmt(c.dosePerInj,c.unit)+(isOral(c) ? ' per dose' : ' per injection'):'No planned dose'}${doseChangeNote(c)}${cycleNote(c)}${stock?` · ${round(stock.rem,2)}/${round(c.vial.sizeMl,2)} ${esc(volUnit(c,2))} in ${contW(c)}`:''}${c.halfLife?` · t½ ${c.halfLife}d`:''}</div></div>
       <svg class="chev" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
     </div>`;
   });
   html += `</div><button class="btn btn-block" data-action="compound-add">Add compound</button>`;
+  const later = db.compounds.filter(c=>!inProtocol(c));
+  if(later.length) html += `<div class="section-label">In stock, not in use</div><div class="card">${later.map(c=>`<div class="list-item tap-row" data-action="compound-edit" data-id="${esc(c.id)}">
+      <div class="list-main"><div class="list-title">${esc(c.name)}</div><div class="list-sub">${esc(strengthLabel(c))}${stockTracked(c) || c.vial ? ` · ${esc(fmtStock(onHand(c).totalMg, c.unit))} on hand` : ''}</div></div>
+      <button class="btn btn-outline" data-action="stock-use" data-id="${esc(c.id)}">Start using</button></div>`).join('')}</div>`;
 
   html += `<div class="section-label">Stock</div><div class="card">
-    <div class="field" style="margin:0"><label for="setLow">Warn when doses left in the open vial is at or below</label>
+    <div class="field" style="margin:0"><label for="setLow">Warn when doses left in the open vial or bottle is at or below</label>
     <input type="number" id="setLow" min="0" max="20" step="1" inputmode="numeric" value="${esc(s.lowStockDoses)}"></div>
     <div class="row2" style="margin-top:12px">
       <div class="field" style="margin:0"><label for="setLead">Delivery takes (days)</label><input type="number" id="setLead" min="0" max="120" step="1" inputmode="numeric" value="${esc(leadDays())}"></div>
@@ -1361,7 +1502,7 @@ async function webSaveFile(blob, name, title){
 const CAL_DAYS = 90;
 function calSig(){
   const s = db.settings;
-  return JSON.stringify([s.morning, s.night, s.privateNotifs, db.compounds.map(c=>[c.id, c.name, c.unit, c.time, c.schedule, c.cycle, c.periods, c.ongoingFrom, c.archived, c.paused, c.dosePerInj, c.doseHistory]), s.labPlan || null, s.labPlan ? db.labs.length : 0]);
+  return JSON.stringify([s.morning, s.night, s.privateNotifs, db.compounds.map(c=>[c.id, c.name, c.unit, c.time, c.schedule, c.cycle, c.periods, c.ongoingFrom, c.archived, c.paused, c.dosePerInj, c.doseHistory, c.perDay, c.supplement]), s.labPlan || null, s.labPlan ? db.labs.length : 0]);
 }
 function calGroups(){
   const now = new Date(), today = dayStart(now), until = addDays(today, CAL_DAYS), groups = {};
@@ -1369,10 +1510,11 @@ function calGroups(){
     if(!hasSchedule(c)) return;
     timeline(c, today, until).forEach(t=>{
       if(t.status==='taken' || t.status==='skipped') return;
-      const [h,m] = hm(c.time==='night' ? db.settings.night : db.settings.morning);
+      const tm = slotTime(c, t);
+      const [h,m] = hm(tm==='night' ? db.settings.night : db.settings.morning);
       const at = new Date(t.day); at.setHours(h,m,0,0);
       if(at <= now) return;
-      const key = `${ymd(t.day)}|${c.time==='night'?'night':'morning'}`;
+      const key = `${ymd(t.day)}|${tm}`;
       const g = (groups[key] = groups[key] || {at, items:[]});
       const dd = doseOn(c, t.day);
       g.items.push(`${c.name}${dd?' '+fmtAmt(dd,c.unit):''}`);
@@ -1389,7 +1531,7 @@ function icsText(){
   const lines = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Enhanced Training Studio//Reminders//EN','CALSCALE:GREGORIAN','METHOD:PUBLISH','X-WR-CALNAME:ETS reminders'];
   const groups = calGroups();
   groups.forEach(([key, g])=>{
-    const title = priv ? 'ETS reminder' : `ETS · ${g.items.length>1 ? `${g.items.length} injections due` : 'Injection due'}`;
+    const title = priv ? 'ETS reminder' : `ETS · ${g.items.length>1 ? `${g.items.length} doses due` : 'Dose due'}`;
     const desc = priv ? 'Open the app to see what’s due.' : g.items.join(' · ') + '\nLog it in Enhanced Training Studio.';
     lines.push('BEGIN:VEVENT', `UID:ets-${key.replace('|','-')}@enhancedtraining.app`, `DTSTAMP:${stamp}`, `DTSTART:${utc(g.at)}`, 'DURATION:PT15M',
       `SUMMARY:${esc2(title)}`, `DESCRIPTION:${esc2(desc)}`, 'TRANSP:TRANSPARENT',
@@ -1489,7 +1631,7 @@ function aboutCardHtml(){
   const free = EDITION === 'free', link = siteLink('/pricing/');
   return `<div class="section-label">About</div><div class="card">
     <div class="kv" style="border:none; padding-top:0"><span>Version</span><span>${esc(BUILD.version)}${free ? ' \u00b7 free edition' : webApp() ? ' \u00b7 web app' : ''}</span></div>
-    ${free ? `<p class="small muted" style="margin:6px 0 0">The free edition covers injections, reminders, levels and backups. Training, blood tests and health come with a licence${link ? `: <a href="${esc(link)}" target="_blank" rel="noopener">${esc(link.replace(/^https:\/\//,''))}</a>` : ''}.</p>` : ''}
+    ${free ? `<p class="small muted" style="margin:6px 0 0">The free edition covers your protocol (injections, orals and supplements), reminders, levels and backups. Training, blood tests and health come with a licence${link ? `: <a href="${esc(link)}" target="_blank" rel="noopener">${esc(link.replace(/^https:\/\//,''))}</a>` : ''}.</p>` : ''}
   </div>`;
 }
 function renderAppSettings(){
@@ -1519,7 +1661,7 @@ function renderAppSettings(){
     <div class="switch-row" style="border-top:1px solid var(--hair); margin-top:12px"><div><div class="list-title">Backup password</div><div class="list-sub">${s.backupCrypto ? 'On. Backups are encrypted and need the password to restore.' : 'Off. Anyone who gets a backup file can read it.'}</div></div>
       <button class="btn btn-outline" data-action="backup-pass" style="flex:none">${s.backupCrypto ? 'Change' : 'Set up'}</button></div>
     ${webApp() ? `<p class="small muted" style="margin:10px 0 0">Export saves a file: choose <b>Save to Files</b> (iCloud Drive) or email it to yourself. Restore it on any phone, including the Android app.</p>` : gdCfg().email ? '' : `<p class="small muted" style="margin:10px 0 0">For a copy off the phone, sign in with Google above, or use Share backup.</p>`}
-    <p class="small muted" style="margin:12px 0 0">Stored: ${[[db.compounds.length,'compound'],[db.logs.length,'injection'],[db.labs.length,'lab result'],[(db.workouts||[]).length,'workout'],[(db.activities||[]).length,'run/walk/hike','runs/walks/hikes'],[Object.keys((db.health&&db.health.days)||{}).length,'day of watch data','days of watch data']].filter(([n],i)=>i<2 || n).map(([n,a,b])=>`${n} ${n===1?a:(b||a+'s')}`).join(' \u00b7 ')}</p>
+    <p class="small muted" style="margin:12px 0 0">Stored: ${[[db.compounds.length,'compound'],[db.logs.length,'dose'],[db.labs.length,'lab result'],[(db.workouts||[]).length,'workout'],[(db.activities||[]).length,'run/walk/hike','runs/walks/hikes'],[Object.keys((db.health&&db.health.days)||{}).length,'day of watch data','days of watch data']].filter(([n],i)=>i<2 || n).map(([n,a,b])=>`${n} ${n===1?a:(b||a+'s')}`).join(' \u00b7 ')}</p>
   </div>
 `;
   
@@ -1549,8 +1691,9 @@ function toast(msg, action){
 }
 function armButton(btn, label, fn){
   if(btn.dataset.armed){ fn(); return; }
-  const orig = btn.innerHTML; btn.dataset.armed = '1'; btn.textContent = label;
-  setTimeout(()=>{ if(btn.isConnected){ delete btn.dataset.armed; btn.innerHTML = orig; } }, 3000);
+  const orig = btn.innerHTML, aria = btn.getAttribute('aria-label'); btn.dataset.armed = '1'; btn.textContent = label;
+  if(aria) btn.setAttribute('aria-label', label);          // screen readers hear the prompt, not the old label
+  setTimeout(()=>{ if(btn.isConnected){ delete btn.dataset.armed; btn.innerHTML = orig; if(aria) btn.setAttribute('aria-label', aria); } }, 3000);
 }
 const segHtml = (id, opts, val) => `<div class="opt-grid" id="${id}" role="group">${opts.map(([v,l])=>`<button type="button" class="opt ${v===val?'active':''}" aria-pressed="${v===val}" data-v="${esc(v)}">${l}</button>`).join('')}</div>`;
 function bindSeg(id, onChange){
@@ -1564,7 +1707,7 @@ function bindSeg(id, onChange){
 const segVal = id => { const a = document.querySelector(`#${id} .opt.active`); return a ? a.dataset.v : null; };
 
 /* ---------- Compound sheet ---------- */
-function openCompoundSheet(id){
+function openCompoundSheet(id, opts={}){
   const ex = id ? db.compounds.find(c=>c.id===id) : null;
   const c = ex ? JSON.parse(JSON.stringify(ex)) : {
     name:'', form:'oil', strength:null, unit:'mg', route:'IM', dosePerInj:null,
@@ -1573,10 +1716,12 @@ function openCompoundSheet(id){
   const sch = c.schedule || {type:'weekly', days:[]};
   const custom = c.barrel && !BARRELS.includes(c.barrel);
   const doseDisp = c.dosePerInj ? round(fromMg(c.dosePerInj, c.unit), 3) : '';
+  const so0 = opts.startUsing ? false : opts.stockOnly || !!(ex && ex.stockOnly);
   openSheet(`
-    <h2>${ex?'Edit compound':'Add compound'}</h2>
+    <h2>${ex ? (opts.startUsing ? `Start using ${esc(c.name)}` : 'Edit compound') : so0 ? 'Add to stock' : 'Add compound'}</h2>
     <div class="field"><label for="cName">Name</label><input id="cName" autocomplete="off" placeholder="e.g. Testosterone cypionate" value="${esc(c.name)}"></div>
-    <div class="field"><span class="field-label">Vial type</span>${segHtml('cForm',[['oil','Oil / liquid'],['powder','Powder (mix with water)']], c.form)}</div>
+    <label class="switch-row" style="margin-bottom:12px"><span><span class="list-title">Stock only</span><br><span class="list-sub">Keep it in Stock for later. No reminders or doses until you start using it${ex && hasSchedule(ex) ? '. Its schedule is kept' : ''}.</span></span><span class="switch"><input type="checkbox" id="cStockOnly" ${so0?'checked':''}><span></span></span></label>
+    <div class="field"><span class="field-label">Form</span>${segHtml('cForm',[['oil','Oil / liquid'],['powder','Powder (mix with water)'],['oral','Tablet / capsule']], c.form)}<div class="hint" id="cFormNote" hidden></div></div>
     <div id="oilBox" ${c.form==='oil'?'':'hidden'}>
       <div class="field"><label for="cStrength">Strength (mg/mL)</label><input id="cStrength" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 200" value="${c.form==='oil' && c.strength ? esc(c.strength) : ''}"></div>
     </div>
@@ -1586,11 +1731,18 @@ function openCompoundSheet(id){
         <div class="field"><label for="cWater">Water added (mL)</label><input id="cWater" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 2" value="${esc(c.waterMl||'')}"></div>
       </div>
     </div>
+    <div id="oralBox" ${c.form==='oral'?'':'hidden'}>
+      <div class="field"><span class="field-label">Comes as</span>${segHtml('cPiece', Object.keys(PIECES).map(k=>[k, PIECES[k][0][0].toUpperCase()+PIECES[k][0].slice(1)]), c.piece || 'tablet')}</div>
+      <div class="field"><label for="cPill"><span id="cPillLbl">Each ${esc(pieceW(c.form==='oral' ? c : {piece:'tablet'}, 1))} contains</span> (<span class="uLbl">${esc(uL(c.unit))}</span>)</label><input id="cPill" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 10" value="${c.form==='oral' && c.strength ? esc(round(fromMg(c.strength, c.unit), 4)) : ''}"></div>
+      <div class="field proto-only"><span class="field-label">Times a day</span>${segHtml('cPerDay', [['1','Once'],['2','Twice (morning and night)']], String(c.perDay===2 ? 2 : 1))}</div>
+      <label class="switch-row proto-only" style="margin-bottom:12px"><span><span class="list-title">Supplement</span><br><span class="list-sub">Shown in a quick checklist on Today instead of a full dose card</span></span><span class="switch"><input type="checkbox" id="cSupp" ${c.supplement?'checked':''}><span></span></span></label>
+    </div>
     <div class="calc" id="cRecon"></div>
-    <div class="field"><span class="field-label">Dose unit</span>${segHtml('cUnit',[['mg','mg'],['mcg','mcg']], c.unit)}</div>
+    <div class="field"><span class="field-label">Dose unit</span>${segHtml('cUnit',[['mg','mg'],['mcg','mcg'],['g','g'],['iu','IU']], okUnit(c.unit)).replace(/data-v="(g|iu)"/g, `data-v="$1" data-oral-only ${c.form==='oral'?'':'hidden'}`)}<div class="hint" id="cUnitNote" hidden></div></div>
+    <div id="protoBox" ${so0?'hidden':''}>
     <div class="row2">
-      <div class="field"><label for="cDose">Per injection (<span class="uLbl">${esc(c.unit)}</span>)</label><input id="cDose" type="number" inputmode="decimal" min="0" step="any" value="${esc(doseDisp)}"></div>
-      <div class="field"><label for="cWeek">Per week (<span class="uLbl">${esc(c.unit)}</span>)</label><input id="cWeek" type="number" inputmode="decimal" min="0" step="any"></div>
+      <div class="field"><label for="cDose"><span id="cDoseWord">${c.form==='oral' ? 'Per dose' : 'Per injection'}</span> (<span class="uLbl">${esc(uL(c.unit))}</span>)</label><input id="cDose" type="number" inputmode="decimal" min="0" step="any" value="${esc(doseDisp)}"></div>
+      <div class="field"><label for="cWeek">Per week (<span class="uLbl">${esc(uL(c.unit))}</span>)</label><input id="cWeek" type="number" inputmode="decimal" min="0" step="any"></div>
     </div>
     ${ex ? `<div class="field"><label for="cDoseFrom">Dose change applies from</label><input id="cDoseFrom" type="date" value="${ymd(new Date())}">
       <div class="hint">Only used if you change the dose. Pick a future date to plan a change; the current dose stays until then.</div></div>
@@ -1619,8 +1771,9 @@ function openCompoundSheet(id){
       <div class="calc" id="cCycPrev"></div>
       <div class="hint" style="margin:-4px 0 12px">After the last day there are no more reminders or missed doses. You can start the next cycle from the Today screen.</div>
     </div>
-    <div class="field"><span class="field-label">Time of day</span>${segHtml('cTime',[['morning','Morning'],['night','Night']], c.time)}</div>
-    <div class="field"><span class="field-label">Injection type</span>${segHtml('cRoute',[['IM','Intramuscular (IM)'],['SubQ','Subcutaneous (SubQ)']], c.route)}</div>
+    <div class="field" id="cTimeF" ${c.form==='oral' && c.perDay===2 ? 'hidden' : ''}><span class="field-label">Time of day</span>${segHtml('cTime',[['morning','Morning'],['night','Night']], c.time)}</div>
+    <div id="injOnly" ${c.form==='oral'?'hidden':''}>
+    <div class="field"><span class="field-label">Injection type</span>${segHtml('cRoute',[['IM','Intramuscular (IM)'],['SubQ','Subcutaneous (SubQ)']], c.route==='SubQ' ? 'SubQ' : 'IM')}</div>
     <div class="field"><span class="field-label">My injection sites</span>
       <div class="opt-grid" id="cSites"></div>
       <div class="hint">Pick the sites you rotate through. Leave them all off and the app rotates through the sites you've used.</div></div>
@@ -1628,12 +1781,14 @@ function openCompoundSheet(id){
       <select id="cBarrel"><option value="">Not set</option>${BARRELS.map(b=>`<option ${c.barrel===b?'selected':''}>${b}</option>`).join('')}<option value="__custom" ${custom?'selected':''}>Other…</option></select>
       <input id="cBarrelCustom" style="margin-top:8px" placeholder="e.g. 2 mL" ${custom?'':'hidden'} value="${custom?esc(c.barrel):''}">
     </div>
-    <details class="more" ${c.vial?'open':''}><summary>Open vial</summary>
+    </div>
+    </div>
+    <details class="more" ${c.vial?'open':''}><summary id="cVialSum">${c.form==='oral' ? `Open ${contW(c)}` : 'Open vial'}</summary>
       <div class="row2">
-        <div class="field"><label for="cVial">Vial size (mL)</label><input id="cVial" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 10" value="${esc(c.vial&&c.vial.sizeMl||'')}"></div>
-        <div class="field"><label for="cRemain">Left now (mL)</label><input id="cRemain" type="number" inputmode="decimal" min="0" step="any" value="${c.vial&&c.vial.remainingMl!=null?round(c.vial.remainingMl,3):''}"></div>
+        <div class="field"><label for="cVial" id="cVialLbl">${c.form==='oral' ? `${pieceW(c,2)[0].toUpperCase()+pieceW(c,2).slice(1)} in the ${contW(c)}` : 'Vial size (mL)'}</label><input id="cVial" type="number" inputmode="decimal" min="0" step="any" placeholder="${c.form==='oral' ? 'e.g. 60' : 'e.g. 10'}" value="${esc(c.vial&&c.vial.sizeMl||'')}"></div>
+        <div class="field"><label for="cRemain" id="cRemainLbl">Left now${c.form==='oral' ? '' : ' (mL)'}</label><input id="cRemain" type="number" inputmode="decimal" min="0" step="any" value="${c.vial&&c.vial.remainingMl!=null?round(c.vial.remainingMl,3):''}"></div>
       </div>
-      <div class="hint" style="margin:-6px 0 12px">Each logged injection subtracts its volume. For powder vials the size is the water you added. Sealed vials you have on hand go in the Stock tab.</div>
+      <div class="hint" id="cVialHint" style="margin:-6px 0 12px">${c.form==='oral' ? 'Each logged dose takes its tablets off. Sealed bottles you have on hand go in the Stock tab.' : 'Each logged injection subtracts its volume. For powder vials the size is the water you added. Sealed vials you have on hand go in the Stock tab.'}</div>
     </details>
     <details class="more" ${c.halfLife?'open':''}><summary>Half-life (for the levels chart)</summary>
       <div class="field"><label for="cHalf">Half-life (days)</label><input id="cHalf" type="number" inputmode="decimal" min="0" step="any" placeholder="From your prescriber or product info" value="${esc(c.halfLife||'')}"></div>
@@ -1648,11 +1803,13 @@ function openCompoundSheet(id){
   let unit = c.unit;
   const strength = ()=>{
     if(segVal('cForm')==='powder'){ const p=num(f('cPowder').value), w=num(f('cWater').value); return p>0&&w>0 ? p/w : NaN; }
+    if(segVal('cForm')==='oral'){ const v = num(f('cPill').value); return v>0 ? toMg(v, unit) : NaN; }
     return num(f('cStrength').value);
   };
+  const timesADay = ()=> segVal('cForm')==='oral' && segVal('cPerDay')==='2' ? 2 : 1;
   const injPerWeek = ()=>{
-    if(segVal('cSchType')==='interval'){ const e=num(f('cEvery').value); return e>0 ? 7/e : 0; }
-    return days.size;
+    if(segVal('cSchType')==='interval'){ const e=num(f('cEvery').value); return e>0 ? 7/e * timesADay() : 0; }
+    return days.size * timesADay();
   };
   const syncWeek = ()=>{ const d=num(f('cDose').value), n=injPerWeek(); f('cWeek').value = (d>0&&n>0) ? round(d*n,3) : ''; };
   const syncDose = ()=>{ const w=num(f('cWeek').value), n=injPerWeek(); if(w>0&&n>0) f('cDose').value = round(w/n,3); };
@@ -1660,16 +1817,64 @@ function openCompoundSheet(id){
     const s = strength(), box = f('cRecon');
     if(!(s>0)){ box.innerHTML=''; return; }
     const d = num(f('cDose').value);
+    if(segVal('cForm')==='oral'){
+      const pc = {form:'oral', piece: segVal('cPiece') || 'tablet'};
+      box.innerHTML = d>0 ? `Each dose: take <b>${esc(takeText(pc, toMg(d,unit)/s))}</b>${timesADay()===2 ? ', morning and night' : ''}` : '';
+      return;
+    }
     let h = `Concentration <b>${round(s,3)} mg/mL</b>${unit==='mcg'?` = <b>${round(s*1000,1)} mcg/mL</b>`:''} · 10 units = ${fmtAmt(s*0.1, unit)}`;
     if(d>0){ const v = toMg(d,unit)/s; h += `<br>Each dose: draw ${drawText(v, null)}`; }
     box.innerHTML = h;
   };
-  bindSeg('cForm', v=>{ f('oilBox').hidden = v!=='oil'; f('powderBox').hidden = v!=='powder'; recon(); });
-  bindSeg('cUnit', v=>{
-    const d = num(f('cDose').value);
-    if(d>0 && v!==unit) f('cDose').value = round(v==='mcg' ? d*1000 : d/1000, 4);
-    unit = v; document.querySelectorAll('.uLbl').forEach(x=>x.textContent=v); syncWeek(); recon();
-  });
+  // amounts put aside when switching between IU and mg/mcg/g, so switching back brings them back
+  const stash = {};
+  const setUnit = v=>{
+    // mg, mcg and g convert; IU is a different scale, so the amounts are cleared to be entered again
+    const iuSwitch = v!==unit && (v==='iu' || unit==='iu');
+    const ids = ['cDose','cPill','cWeek'], note = f('cUnitNote');
+    if(iuSwitch){
+      const vals = ids.map(id=>num(f(id).value));
+      stash[unit==='iu' ? 'iu' : 'mass'] = {unit, vals};
+      const back = stash[v==='iu' ? 'iu' : 'mass'];
+      ids.forEach((id, i)=>{ const x = back && back.vals[i]; f(id).value = x>0 ? round(fromMg(toMg(x, back.unit), v), 4) : ''; });
+      const cleared = vals.some(x=>x>0);
+      note.hidden = !cleared;
+      if(cleared) note.textContent = `IU and ${unit==='iu' ? uL(v) : uL(unit)} don't convert, so the amounts were cleared. Enter them in ${uL(v)}, or switch back to get them back.`;
+    } else {
+      ids.forEach(id=>{ const x = num(f(id).value); if(x>0 && v!==unit) f(id).value = round(fromMg(toMg(x, unit), v), 4); });
+      if(v!==unit) note.hidden = true;
+    }
+    unit = v; document.querySelectorAll('.uLbl').forEach(x=>x.textContent=uL(v));
+    document.querySelectorAll('#cUnit .opt').forEach(o=>{ o.classList.toggle('active', o.dataset.v===v); o.setAttribute('aria-pressed', String(o.dataset.v===v)); });
+    syncWeek(); recon();
+  };
+  // oral-only parts of the sheet (and tablet/bottle wording) follow the form
+  const applyForm = ()=>{
+    const v = segVal('cForm'), oral = v==='oral', pc = {form:'oral', piece: segVal('cPiece') || 'tablet'};
+    f('oilBox').hidden = v!=='oil'; f('powderBox').hidden = v!=='powder'; f('oralBox').hidden = !oral; f('injOnly').hidden = oral;
+    f('cTimeF').hidden = oral && timesADay()===2;
+    document.querySelectorAll('#cUnit [data-oral-only]').forEach(b=>{ b.hidden = !oral; });
+    if(!oral && (unit==='g' || unit==='iu')) setUnit('mg');
+    // an existing compound's stock is counted in mL or in tablets, which don't convert: say so before saving
+    const fn = f('cFormNote'), resets = ex && isOral(ex) !== oral && (ex.vial || stockTracked(ex));
+    fn.hidden = !resets;
+    if(resets) fn.textContent = `Changing between ${isOral(ex) ? 'tablets' : 'an injectable'} and ${oral ? 'tablets' : 'an injectable'} empties this compound's stock when you save (vials and bottles don't convert). You can add it again in the Stock tab.`;
+    f('cPillLbl').textContent = `Each ${pieceW(pc, 1)} contains`;
+    f('cVialSum').textContent = oral ? `Open ${contW(pc)}` : 'Open vial';
+    const many = pieceW(pc, 2);
+    f('cVialLbl').textContent = oral ? `${many[0].toUpperCase()+many.slice(1)} in the ${contW(pc)}` : 'Vial size (mL)';
+    f('cRemainLbl').textContent = oral ? 'Left now' : 'Left now (mL)';
+    f('cVial').placeholder = oral ? 'e.g. 60' : 'e.g. 10';
+    f('cDoseWord').textContent = oral ? 'Per dose' : 'Per injection';
+    f('cVialHint').textContent = oral ? `Each logged dose takes its ${many} off. Sealed ${contW(pc)}s you have on hand go in the Stock tab.` : 'Each logged injection subtracts its volume. For powder vials the size is the water you added. Sealed vials you have on hand go in the Stock tab.';
+    syncWeek(); recon();
+  };
+  bindSeg('cForm', applyForm);
+  const applyStockOnly = ()=>{ const on = f('cStockOnly').checked; f('protoBox').hidden = on; document.querySelectorAll('#sheetRoot .proto-only').forEach(x=>{ x.hidden = on; }); if(!ex) f('cSave').textContent = on ? 'Add to stock' : 'Add compound'; else if(opts.startUsing) f('cSave').textContent = on ? 'Save changes' : 'Start using'; };
+  f('cStockOnly').addEventListener('change', applyStockOnly); applyStockOnly();
+  bindSeg('cPiece', applyForm);
+  bindSeg('cPerDay', ()=>{ applyForm(); cycPreview(); });
+  bindSeg('cUnit', v=>setUnit(v));
   bindSeg('cSchType', v=>{ f('weeklyBox').hidden = v!=='weekly'; f('intervalBox').hidden = v!=='interval'; syncWeek(); });
   bindSeg('cTime', ()=>{});
   let mySites = new Set(Array.isArray(c.sites) ? c.sites : []);
@@ -1694,7 +1899,7 @@ function openCompoundSheet(id){
     f('cEveryQuick').querySelectorAll('.opt').forEach(o=>o.classList.toggle('active', o===b)); syncWeek();
   });
   f('cEvery').addEventListener('input', ()=>{ f('cEveryQuick').querySelectorAll('.opt').forEach(o=>o.classList.toggle('active', +o.dataset.v===num(f('cEvery').value))); syncWeek(); });
-  ['cStrength','cPowder','cWater'].forEach(i=>f(i).addEventListener('input', recon));
+  ['cStrength','cPowder','cWater','cPill'].forEach(i=>f(i).addEventListener('input', recon));
   f('cDose').addEventListener('input', ()=>{ syncWeek(); recon(); });
   f('cWeek').addEventListener('input', ()=>{ syncDose(); recon(); });
   f('cWater').addEventListener('input', ()=>{ if(!f('cVial').value || f('cVial').dataset.auto){ f('cVial').value = f('cWater').value; f('cVial').dataset.auto='1'; } });
@@ -1719,11 +1924,11 @@ function openCompoundSheet(id){
     if(!cy){ box.innerHTML = ''; return; }
     if(cy.bad){ box.innerHTML = cy.bad==='len' ? 'Enter how long the cycle lasts.' : 'Pick the date the cycle starts.'; return; }
     if(cy.days > 730){ box.innerHTML = 'That\u2019s longer than two years. Use Ongoing instead.'; return; }
-    const tmp = {schedule: formSchedule(), cycle: cy, pauses: []};
+    const tmp = {schedule: formSchedule(), cycle: cy, pauses: [], form: segVal('cForm'), perDay: timesADay()};
     const doses = hasSchedule(tmp) ? cycleDoses(tmp, cy) : [];
     const last = ymd(addDays(parseYmd(cycleEndOf(cy)), -1));
     box.innerHTML = `<b>${esc(cycleLengthText(cy))}</b>: ${esc(fmtDate(parseYmd(cy.start)))} to ${esc(fmtDate(parseYmd(last)))}` +
-      (hasSchedule(tmp) ? `<br>${doses.length} ${doses.length===1?'dose':'doses'}${doses.length ? ` · last dose ${esc(fmtDate(doses[doses.length-1]))}` : ''}` : '<br>Pick the schedule above to see the doses.');
+      (hasSchedule(tmp) ? `<br>${doses.length*perDay(tmp)} ${doses.length*perDay(tmp)===1?'dose':'doses'}${doses.length ? ` · last dose ${esc(fmtDate(doses[doses.length-1]))}` : ''}` : '<br>Pick the schedule above to see the doses.');
   };
   const startLabel = ()=>{ const lb = document.querySelector('label[for="cStart"]'); if(lb) lb.textContent = segVal('cCycle')==='cycle' ? 'Cycle starts (first dose)' : 'First dose on'; };
   bindSeg('cCycle', v=>{
@@ -1803,10 +2008,13 @@ function openCompoundSheet(id){
     const form = segVal('cForm');
     const s = strength();
     if(!name){ f('cName').focus(); return err.textContent = 'Enter a name.'; }
-    if(!(s>0)) return err.textContent = form==='powder' ? 'Enter the powder amount and the water added.' : 'Enter the strength in mg/mL.';
-    const type = segVal('cSchType');
+    if(!(s>0)) return err.textContent = form==='powder' ? 'Enter the powder amount and the water added.' : form==='oral' ? `Enter how much each ${pieceW({form:'oral', piece:segVal('cPiece')}, 1)} contains.` : 'Enter the strength in mg/mL.';
+    const stockOnly = f('cStockOnly').checked;
+    const type = stockOnly ? 'weekly' : segVal('cSchType');
     let schedule;
-    if(type==='interval'){
+    // not in the protocol: nothing is planned, but a schedule it already had is kept for when it's used again
+    if(stockOnly) schedule = ex && ex.schedule ? ex.schedule : {type:'weekly', days:[]};
+    else if(type==='interval'){
       const every = num(f('cEvery').value);
       if(!(every>=1 && every<=365)) return err.textContent = 'Enter how many days between doses: 1 to 365 (e.g. 3.5).';
       if(!f('cStart').value) return err.textContent = 'Pick the date of the first dose.';
@@ -1814,15 +2022,17 @@ function openCompoundSheet(id){
     } else {
       schedule = {type:'weekly', days:[...days].sort()};
     }
-    const cycle = formCycle();
+    const cycle = stockOnly ? null : formCycle();
     if(cycle && cycle.bad) return err.textContent = cycle.bad==='len' ? 'Enter how long the cycle lasts, or choose Ongoing.' : 'Pick the date the cycle starts.';
     if(cycle && cycle.days > 730) return err.textContent = 'A cycle can be up to two years. Use Ongoing for longer.';
     if(cycle && (schedule.type==='interval' || schedule.days.length) && !cycleDoses({schedule, cycle, pauses:[]}, cycle).length) return err.textContent = 'No doses fall inside this cycle. Check the start date and length.';
+    if(!stockOnly && ex && ex.stockOnly && !(schedule.type==='interval' || schedule.days.length)) return err.textContent = 'Pick a schedule to start using it, or turn Stock only back on.';
     const doseIn = num(f('cDose').value);
     let barrel = f('cBarrel').value; if(barrel==='__custom') barrel = f('cBarrelCustom').value.trim();
     const vialSize = num(f('cVial').value), remain = num(f('cRemain').value);
     const half = num(f('cHalf').value);
-    const prevSched = ex ? JSON.stringify(ex.schedule) : null;
+    const prevSched = ex ? JSON.stringify([ex.schedule, perDay(ex)]) : null;
+    const wasOral = ex ? isOral(ex) : null, wasParked = !!(ex && ex.stockOnly);
     const prevStart = ex && ex.schedule ? ex.schedule.start : null;
     const out = ex || {id:uid(), createdAt:new Date().toISOString(), pauses:[]};
     if(ex) out._oldCycle = ex.cycle ? {...ex.cycle} : null;
@@ -1836,23 +2046,33 @@ function openCompoundSheet(id){
         hist = hist.filter(e=>e.from!==fromK).concat([{from:fromK, dose:newDose}]).sort((a,b)=>a.from<b.from?-1:1);
       }
     }
+    const oral = form==='oral';
     Object.assign(out, {
-      name, form, strength: round(s,6), unit, route: segVal('cRoute'), time: segVal('cTime'),
-      dosePerInj: newDose, schedule, barrel,
+      name, form, strength: round(s,6), unit, route: oral ? 'Oral' : segVal('cRoute'), time: segVal('cTime'),
+      dosePerInj: newDose, schedule, barrel: oral ? '' : barrel,
       powderMg: form==='powder' ? num(f('cPowder').value) : null,
       waterMl: form==='powder' ? num(f('cWater').value) : null,
       vial: vialSize>0 ? vialFromSheet(ex, vialSize, remain) : null,
       halfLife: half>0 ? half : null,
-      sites: [...mySites].filter(x=>SITES[segVal('cRoute')].includes(x)),
+      sites: oral ? [] : [...mySites].filter(x=>SITES[segVal('cRoute')].includes(x)),
       doseHistory: hist
     });
+    if(stockOnly) out.stockOnly = true; else delete out.stockOnly;
+    if(oral) Object.assign(out, {perDay: timesADay(), piece: segVal('cPiece') || 'tablet', supplement: f('cSupp').checked});
+    else { delete out.perDay; delete out.piece; delete out.supplement; }
+    // vials (mL) and bottles (tablets) don't convert: switching between an injectable and an oral starts stock afresh
+    if(ex && wasOral !== oral && (out.vial || stockTracked(out))){ out.vial = null; delete out.stock; setTimeout(()=>toast('Stock was reset because the form changed. Add it again in the Stock tab.'), 2800); }
     out.dosePerInj = hist.length ? doseOn(out, new Date()) : newDose;
-    applyCycle(out, ex, cycle, prevStart);
+    if(stockOnly && ex) delete out._oldCycle;           // parked: its cycle stays as it was
+    else applyCycle(out, ex, cycle, prevStart);
     if(ex){
-      if(prevSched !== JSON.stringify(schedule)) out.scheduleSince = ymd(new Date());
+      // starting to use a parked compound: the days it sat in stock don't count as missed
+      if(prevSched !== JSON.stringify([schedule, perDay(out)]) || (wasParked && !stockOnly)) out.scheduleSince = ymd(new Date());
       db.logs.forEach(l=>{ if(l.compoundId===ex.id) l.compoundName = name; });
     } else db.compounds.push(out);
-    save(); closeSheet(); render(); haptic(); toast(ex ? 'Changes saved' : `${name} added`);
+    save(); closeSheet(); render(); haptic();
+    toast(ex ? (opts.startUsing && !stockOnly ? `${name} is now in your protocol` : 'Changes saved') : stockOnly ? `${name} added to Stock` : `${name} added`);
+    if(!ex && stockOnly && opts.thenStock) openStockSheet(out.id);
   });
 }
 
@@ -1905,7 +2125,7 @@ function openNextCycleSheet(id){
     const cy = read(), box = f('ncPrev');
     if(!(cy.len>=1) || !cy.start){ box.innerHTML = 'Pick a start date and length.'; return; }
     const doses = cycleDoses(tmpC(cy), cy);
-    box.innerHTML = `<b>${esc(cycleLengthText(cy))}</b>: ${esc(fmtDate(parseYmd(cy.start)))} to ${esc(fmtDate(addDays(parseYmd(cycleEndOf(cy)),-1)))}<br>${doses.length} ${doses.length===1?'dose':'doses'}${doses.length?` · last dose ${esc(fmtDate(doses[doses.length-1]))}`:''}`;
+    box.innerHTML = `<b>${esc(cycleLengthText(cy))}</b>: ${esc(fmtDate(parseYmd(cy.start)))} to ${esc(fmtDate(addDays(parseYmd(cycleEndOf(cy)),-1)))}<br>${doses.length*perDay(c)} ${doses.length*perDay(c)===1?'dose':'doses'}${doses.length?` · last dose ${esc(fmtDate(doses[doses.length-1]))}`:''}`;
   };
   bindSeg('ncUnit', prev); ['ncStart','ncLen'].forEach(x=>f(x).addEventListener('input', prev)); prev();
   f('ncGo').addEventListener('click', ()=>{
@@ -1936,28 +2156,32 @@ function openLogSheet(opts={}){
     }));
     return;
   }
-  let cid = ex ? ex.compoundId : (opts.compoundId || (db.compounds.find(c=>statusFor(c).due) || db.compounds[0] || {}).id);
+  const usable = db.compounds.filter(inProtocol);
+  if(!ex && !usable.length){ ui.mode='inj'; ui.tab='setup'; render(); return openCompoundSheet(); }
+  let cid = ex ? ex.compoundId : (opts.compoundId && usable.some(c=>c.id===opts.compoundId) ? opts.compoundId : (usable.find(c=>statusFor(c).due) || usable[0]).id);
   const getC = () => db.compounds.find(c=>c.id===cid);
   let c = getC();
   let when;
   if(ex) when = new Date(ex.date);
   else if(opts.day){
     when = parseYmd(opts.day);
-    const [h,m] = hm(c && c.time==='night' ? db.settings.night : db.settings.morning);
+    // twice a day: the dose asked for (Calendar row), or the first empty one on that day (morning, then night)
+    const night = c && perDay(c)===2 ? (opts.slot===0 || opts.slot===1 ? opts.slot===1 : timeline(c, when, when).some(t=>t.slot===0 && t.log)) : c && c.time==='night';
+    const [h,m] = hm(night ? db.settings.night : db.settings.morning);
     if(ymd(when)===ymd(new Date())) when = new Date(); else when.setHours(h,m,0,0);
   } else when = new Date();
-  const compOpts = db.compounds.map(x=>`<option value="${esc(x.id)}" ${x.id===cid?'selected':''}>${esc(x.name)}</option>`).join('')
+  const compOpts = db.compounds.filter(x=>inProtocol(x) || x.id===cid).map(x=>`<option value="${esc(x.id)}" ${x.id===cid?'selected':''}>${esc(x.name)}</option>`).join('')
     + (ex && !c ? `<option value="${esc(ex.compoundId)}" selected>${esc(ex.compoundName||'Removed compound')}</option>` : '');
   openSheet(`
     <h2>${ex?'Edit dose':'Log dose'}</h2>
     <div class="field"><label for="lComp">Compound</label><select id="lComp">${compOpts}</select></div>
     <div class="row2">
-      <div class="field"><label for="lDose">Dose (<span id="lUnit">${esc((c&&c.unit)||(ex&&ex.unit)||'mg')}</span>)</label><input id="lDose" type="number" inputmode="decimal" min="0" step="any"></div>
+      <div class="field"><label for="lDose">Dose (<span id="lUnit">${esc(uL((c&&c.unit)||(ex&&ex.unit)||'mg'))}</span>)</label><input id="lDose" type="number" inputmode="decimal" min="0" step="any"></div>
       <div class="field"><label for="lDate">Date &amp; time</label><input id="lDate" type="datetime-local" value="${toLocalInput(when)}"></div>
     </div>
     <div class="calc" id="lCalc"></div>
-    <div class="field"><span class="field-label">Injection site</span><div class="site-grid" id="lSites"></div></div>
-    <div class="field"><label for="lNotes">Notes</label><textarea id="lNotes" placeholder="Side effects, how you feel, site pain…">${esc(ex?ex.notes||'':'')}</textarea></div>
+    <div class="field" id="lSiteF"><span class="field-label">Injection site</span><div class="site-grid" id="lSites"></div></div>
+    <div class="field"><label for="lNotes">Notes</label><textarea id="lNotes" placeholder="${c && isOral(c) ? 'Side effects, how you feel…' : 'Side effects, how you feel, site pain…'}">${esc(ex?ex.notes||'':'')}</textarea></div>
     <div class="sheet-actions"><button class="btn btn-block" id="lSave">${ex?'Save changes':'Save dose'}</button><div class="form-err" id="lErr" role="alert" style="margin-top:6px; min-height:0"></div></div>
     ${ex?`<button class="btn btn-danger btn-block" style="margin-top:10px" id="lDel">Delete entry</button>`:''}
     
@@ -1966,7 +2190,10 @@ function openLogSheet(opts={}){
   let site = ex ? ex.site || null : null;
   const unitOf = () => (c && c.unit) || (ex && ex.unit) || 'mg';
   const renderSites = ()=>{
-    const route = c ? c.route : (ex && SITES.SubQ.includes(ex.site) ? 'SubQ' : 'IM');
+    const oral = isOral(c) || (!c && ex && ex.piece);
+    f('lSiteF').hidden = !!oral;
+    if(oral){ site = null; f('lSites').innerHTML = ''; return; }
+    const route = c && SITES[c.route] ? c.route : (ex && SITES.SubQ.includes(ex.site) ? 'SubQ' : 'IM');
     const last = siteHistory(route);
     const sug = suggestSite(route, c);
     if(!ex && (!site || !SITES[route].includes(site))) site = sug;
@@ -1989,12 +2216,12 @@ function openLogSheet(opts={}){
     let h = '';
     if(d>0 && strength>0){
       const v = toMg(d, unitOf())/strength;
-      h = `Draw ${drawText(v, c)}<div class="calc-scale">${syringeSvg(c, v, false)}</div>`;
+      h = isOral(c) ? `Take <b>${esc(takeText(c, v))}</b><br>` : `Draw ${drawText(v, c)}<div class="calc-scale">${syringeSvg(c, v, false)}</div>`;
       const st = c && stockInfo(c);
       if(st){
         const prevVol = ex && ex.compoundId===cid ? (ex.volumeMl||0) : 0;
-        const after = st.rem + prevVol - v;
-        h += `Vial after this: <b>${round(Math.max(0,after),2)} mL</b>${after<0?' (more than is left — start a new vial first)':''}`;
+        const after = st.rem + prevVol - v, cw = contW(c);
+        h += `${cap1(cw)} after this: <b>${round(Math.max(0,after),2)} ${esc(volUnit(c, 2))}</b>${after<0?` (more than is left — start a new ${cw} first)`:''}`;
       }
     }
     f('lCalc').innerHTML = h;
@@ -2003,7 +2230,7 @@ function openLogSheet(opts={}){
     const b = e.target.closest('.opt'); if(!b) return;
     site = b.dataset.s; f('lSites').querySelectorAll('.opt').forEach(o=>o.classList.toggle('active', o===b));
   });
-  f('lComp').addEventListener('change', ()=>{ cid = f('lComp').value; c = getC(); f('lUnit').textContent = unitOf(); if(!ex) site=null; renderSites(); prefill(); calc(); });
+  f('lComp').addEventListener('change', ()=>{ cid = f('lComp').value; c = getC(); f('lUnit').textContent = uL(unitOf()); if(!ex) site=null; renderSites(); prefill(); calc(); });
   f('lDose').addEventListener('input', calc);
   renderSites(); prefill(); calc();
 
@@ -2017,7 +2244,7 @@ function openLogSheet(opts={}){
     const d = num(f('lDose').value);
     const dt = new Date(f('lDate').value);
     if(!cid) return err.textContent = 'Choose a compound.';
-    if(!(d>0)) return err.textContent = `Enter a dose above 0 ${unitOf()}.`;
+    if(!(d>0)) return err.textContent = `Enter a dose above 0 ${uL(unitOf())}.`;
     if(isNaN(dt.getTime())) return err.textContent = 'Pick a date and time.';
     if(dt - Date.now() > 36e5) return err.textContent = 'That time is in the future. Log doses after you take them.';
     const unit = unitOf();
@@ -2029,9 +2256,12 @@ function openLogSheet(opts={}){
     if(ex){
       adjustStock(ex.compoundId, ex.volumeMl||0, ex.date); // undo old
       Object.assign(ex, {compoundId:cid, compoundName: c?c.name:ex.compoundName, strength, unit, dose:mg, volumeMl:vol, date:dt.toISOString(), site, notes});
+      if(isOral(c)) ex.piece = c.piece || 'tablet'; else if(c) delete ex.piece;
       adjustStock(cid, -(vol||0), ex.date);
     } else {
-      db.logs.push({id:uid(), compoundId:cid, compoundName:c.name, strength, unit, dose:mg, volumeMl:vol, date:dt.toISOString(), site, notes});
+      // a twice-daily dose logged for a particular morning or night (from the Calendar) keeps that slot
+      const slot = (opts.slot===0 || opts.slot===1) && c && perDay(c)===2 && opts.day && ymd(new Date(+dt - 4*3600e3))===opts.day ? {slot:opts.slot} : {};
+      db.logs.push({id:uid(), compoundId:cid, compoundName:c.name, strength, unit, dose:mg, volumeMl:vol, date:dt.toISOString(), site, notes, ...(isOral(c) ? {piece:c.piece||'tablet'} : {}), ...slot});
       adjustStock(cid, -(vol||0), dt);
     }
     save(); closeSheet(); render(); haptic('success');
@@ -2101,7 +2331,7 @@ function recentSiteLog(dayK){
     .sort((a,b)=>new Date(b.date)-new Date(a.date))[0] || null;
 }
 function checkinCardHtml(){
-  if(db.settings.checkin === false || !db.compounds.length) return '';
+  if(db.settings.checkin === false || !db.compounds.some(inProtocol)) return '';
   const k = ymd(new Date()), x = checkinOn(k);
   if(x) return `<div class="card checkin-done tap-row" data-action="checkin-open" data-day="${esc(k)}" aria-label="Edit today's check-in">
       <span class="alert-code" style="color:var(--muted)">CHECKED IN</span><span class="small">${esc(checkinText(x))}</span></div>`;
@@ -2207,18 +2437,19 @@ function newVial(id){
   const pick0 = fresh.find(same) || fresh[0] || null;
   const size0 = pick0 && !powder ? pick0.sizeMl : (c.vial ? c.vial.sizeMl : '');
   const optLabel = x => `${lineLabel(c,x)}${x.expiry ? ` · ${notExpired(x.expiry) ? 'exp' : 'EXPIRED'} ${fmtShortY(parseYmd(x.expiry))}` : ''} (${x.count} sealed)`;
-  openSheet(`<h2>Start a new vial</h2>
+  const cw = contW(c), oral = isOral(c);
+  openSheet(`<h2>Start a new ${cw}</h2>
     <p class="muted" style="margin-top:-6px">${esc(c.name)}</p>
-    ${avail.length ? `<div class="field"><span class="field-label">Which vial</span>${segHtml('vFrom', avail.map(x=>[x.id, esc(optLabel(x))]).concat([['none','Not from Stock']]), pick0 ? pick0.id : 'none')}</div>` : ''}
-    <div class="field" ${powder?'hidden':''}><label for="vSize">Vial size (mL)</label><input id="vSize" type="number" inputmode="decimal" min="0" step="any" value="${esc(size0)}"></div>
+    ${avail.length ? `<div class="field"><span class="field-label">Which ${cw}</span>${segHtml('vFrom', avail.map(x=>[x.id, esc(optLabel(x))]).concat([['none','Not from Stock']]), pick0 ? pick0.id : 'none')}</div>` : ''}
+    <div class="field" ${powder?'hidden':''}><label for="vSize">${oral ? `${cap1(pieceW(c,2))} in the ${cw}` : 'Vial size (mL)'}</label><input id="vSize" type="number" inputmode="decimal" min="0" step="any" value="${esc(size0)}"></div>
     ${powder?`<div class="row2"><div class="field"><label for="vPowder">Powder (mg)</label><input id="vPowder" type="number" inputmode="decimal" step="any" value="${esc(pick0 ? pick0.powderMg : (c.powderMg||''))}"></div><div class="field"><label for="vWater">Water added (mL)</label><input id="vWater" type="number" inputmode="decimal" step="any" value="${esc(c.waterMl||'')}"></div></div>`:''}
     <div class="calc" id="vNote" hidden></div>
-    <button class="btn btn-block" id="vSave">Start new vial</button><div class="form-err" id="vErr" role="alert"></div>`);
+    <button class="btn btn-block" id="vSave">Start new ${cw}</button><div class="form-err" id="vErr" role="alert"></div>`);
   let pick = pick0;
   const note = ()=>{
     const el = $('#vNote'), bits = [];
-    if(pick && !powder && Math.abs(pick.strength - c.strength) > 1e-9) bits.push(`Strength changes from ${round(c.strength,3)} to ${round(pick.strength,3)} mg/mL. Doses you log from now on use the new strength.`);
-    if(pick && pick.expiry && pick.expiry < ymd(new Date())) bits.push(`This vial ${expText(pick.expiry)}.`);
+    if(pick && !powder && Math.abs(pick.strength - c.strength) > 1e-9) bits.push(oral ? `Strength changes from ${fmtAmt(c.strength, c.unit)} to ${fmtAmt(pick.strength, c.unit)} per ${pieceW(c,1)}. Doses you log from now on use the new strength.` : `Strength changes from ${round(c.strength,3)} to ${round(pick.strength,3)} mg/mL. Doses you log from now on use the new strength.`);
+    if(pick && pick.expiry && pick.expiry < ymd(new Date())) bits.push(`This ${cw} ${expText(pick.expiry)}.`);
     el.hidden = !bits.length; el.textContent = bits.join(' ');
   };
   if(avail.length) bindSeg('vFrom', v=>{
@@ -2235,20 +2466,21 @@ function newVial(id){
       if(!(p>0 && w>0)) return $('#vErr').textContent = 'Enter the powder amount and water added.';
       c.powderMg = p; c.waterMl = w; c.strength = round(p/w, 6); size = w;
     }
-    if(!(size>0)) return $('#vErr').textContent = 'Enter the vial size in mL.';
+    if(!(size>0)) return $('#vErr').textContent = oral ? `Enter how many ${pieceW(c,2)} are in the ${cw}.` : 'Enter the vial size in mL.';
     if(pick && !powder) c.strength = round(pick.strength, 6);
     if(pick) pick.count = Math.max(0, pick.count - 1);
     c.vial = {sizeMl:size, remainingMl:size, openedAt:new Date().toISOString()};
     if(pick){ if(pick.price>0) c.vial.price = pick.price; if(pick.expiry) c.vial.expiry = pick.expiry; if(pick.batch) c.vial.batch = pick.batch; }
     save(); closeSheet(); render(); haptic();
-    toast(pick ? `New vial started · ${sealedCount(c)} sealed left` : 'New vial started');
+    toast(pick ? `New ${cw} started · ${sealedCount(c)} sealed left` : `New ${cw} started`);
   });
 }
 
 /* ---------- Stock tab ---------- */
 function renderStock(){
-  if(!db.compounds.length) return `<div class="empty">Add a compound first. Then you can keep count of its vials here.</div><button class="btn btn-block" data-action="compound-add">Add compound</button>`;
-  const on = db.compounds.filter(c=>c.vial || stockTracked(c)), off = db.compounds.filter(c=>!(c.vial || stockTracked(c)));
+  if(!db.compounds.length) return `<div class="card"><div class="empty">Nothing in stock yet. Add something you have on hand, even if you're not taking it yet.<br><br><button class="btn" data-action="stock-new">Add to stock</button></div></div>`;
+  const byUse = (a,b)=>(inProtocol(a)?0:1) - (inProtocol(b)?0:1);
+  const on = db.compounds.filter(c=>c.vial || stockTracked(c)).sort(byUse), off = db.compounds.filter(c=>!(c.vial || stockTracked(c))).sort(byUse);
   let html = '';
   // spending across everything with a price
   const costs = on.map(costInfo).filter(Boolean);
@@ -2256,33 +2488,30 @@ function renderStock(){
     const month = costs.reduce((t,x)=>t+x.month, 0), value = costs.reduce((t,x)=>t+x.value, 0);
     html += `<div class="card stock-sum"><div class="kv"><span>Spending</span><span>about ${fmtMoney(month)} a month</span></div>
       <div class="kv"><span>Stock worth</span><span>${fmtMoney(value)}</span></div>
-      ${costs.length < on.length ? `<div class="hint" style="margin-top:6px">Only compounds with a vial price are counted. Add a price to sealed vials to include the rest.</div>` : ''}</div>`;
+      ${costs.length < on.length ? `<div class="hint" style="margin-top:6px">Only compounds with a price are counted. Add a price to sealed vials or bottles to include the rest.</div>` : ''}</div>`;
   }
   html += on.map(stockCard).join('');
   if(off.length){
     html += `<div class="section-label">${on.length ? 'Not counted yet' : 'Your compounds'}</div><div class="card" style="padding-top:2px; padding-bottom:2px">` + off.map(c=>`<div class="list-item">
-      <div class="list-main"><div class="list-title">${esc(c.name)}</div><div class="list-sub">${esc(strengthLabel(c))}</div></div>
-      <button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add vials</button></div>`).join('') + `</div>`;
+      <div class="list-main tap-row stock-title" data-action="stock-detail" data-id="${esc(c.id)}" aria-label="${esc(`Edit ${c.name} stock`)}"><div class="list-title">${esc(c.name)} <span class="stock-chev" aria-hidden="true">›</span></div><div class="list-sub">${esc(strengthLabel(c))}${inProtocol(c) ? '' : ' · not in use'}</div></div>
+      <button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add ${contW(c)}s</button></div>`).join('') + `</div>`;
   }
-  html += `<p class="small muted" style="text-align:center; margin:18px 8px 4px">Logged injections come off the open vial. Starting a new vial takes one off the sealed count (soonest expiry first).</p>`;
+  html += `<p class="small muted" style="text-align:center; margin:18px 8px 4px">Logged doses come off the open vial or bottle. Starting a new one takes it off the sealed count (soonest expiry first).</p>`;
   return html;
 }
 function stockCard(c){
   const st = stockInfo(c), oh = onHand(c), lines = stockLines(c), tracked = lines.length > 0;
-  const tag = !tracked ? '' : oh.sealed ? '' : st && st.rem > 0 ? '<span class="tag tag-due">Last vial</span>' : '<span class="tag tag-late">None left</span>';
-  const r = stockRunway(c, oh.totalMg), rt = runwayText(c, r);
+  const tag = !inProtocol(c) ? '<span class="tag tag-muted">Not in use</span>' : !tracked ? '' : oh.sealed ? '' : st && st.rem > 0 ? `<span class="tag tag-due">Last ${contW(c)}</span>` : '<span class="tag tag-late">None left</span>';
+  const r = stockRunway(c), rt = runwayText(c, r);
   const short = r && r.short && diffDays(r.short, new Date()) <= 14;
   const soon = ymd(addDays(new Date(), 30)), today = ymd(new Date());
   const expBit = k => k ? ` · <span class="${k <= soon ? 'exp-warn' : ''}">${k < today ? 'expired' : 'exp'} ${esc(fmtShortY(parseYmd(k)))}</span>` : '';
-  let h = `<div class="card stock-card"><div class="card-head"><div class="grow"><div class="dose-name">${esc(c.name)}</div><div class="small muted">${esc(strengthLabel(c))}</div></div>${tag}</div>`;
-  h += `<div class="kv"><span>Open vial</span><span>${st ? `${round(st.rem,2)} / ${round(c.vial.sizeMl,2)} mL · ${fmtStock(oh.openMg, c.unit)}${expBit(c.vial.expiry)}` : 'None'}</span></div>`;
+  // a summary: tapping the name opens the screen where everything is edited
+  let h = `<div class="card stock-card"><div class="card-head"><div class="grow tap-row stock-title" data-action="stock-detail" data-id="${esc(c.id)}" aria-label="${esc(`Edit ${c.name} stock`)}"><div class="dose-name">${esc(c.name)} <span class="stock-chev" aria-hidden="true">›</span></div><div class="small muted">${esc(strengthLabel(c))}</div></div>${tag}</div>`;
+  h += `<div class="kv"><span>Open ${contW(c)}</span><span>${st ? `${round(st.rem,2)} / ${round(c.vial.sizeMl,2)} ${esc(volUnit(c,2))} · ${fmtStock(oh.openMg, c.unit)}${expBit(c.vial.expiry)}` : 'None'}</span></div>`;
   lines.forEach(x=>{
-    const lbl = lineLabel(c, x);
     const extra = `${x.price>0 ? ` · ${fmtMoney(x.price)}` : ''}${expBit(x.expiry)}${x.batch ? ` · batch ${esc(x.batch)}` : ''}`;
-    h += `<div class="stock-line">
-      <div class="grow tap-row" data-action="stock-edit" data-id="${esc(c.id)}" data-line="${esc(x.id)}" aria-label="${esc(`Edit ${lbl} vials`)}"><div>Sealed · ${esc(lbl)}</div><div class="small muted">${fmtStock(sealedMg(c, x), c.unit)} each${extra}</div></div>
-      <div class="stepper"><button type="button" class="btn btn-outline" data-action="stock-dec" data-id="${esc(c.id)}" data-line="${esc(x.id)}" aria-label="${esc(`One fewer ${lbl} vial`)}" ${x.count?'':'disabled'}>−</button><span class="step-n" aria-label="${esc(`${x.count} sealed`)}">${x.count}</span><button type="button" class="btn btn-outline" data-action="stock-inc" data-id="${esc(c.id)}" data-line="${esc(x.id)}" aria-label="${esc(`One more ${lbl} vial`)}">+</button></div>
-    </div>`;
+    h += `<div class="kv kv-wrap"><span>Sealed · ${esc(lineLabel(c, x))}<br><span class="small muted">${fmtStock(sealedMg(c, x), c.unit)} each${extra}</span></span><span>× ${x.count}</span></div>`;
   });
   h += `<div class="kv"><span>On hand</span><span>${fmtStock(oh.totalMg, c.unit)}${oh.sealed ? ` · ${oh.sealed} sealed` : ''}${oh.expired ? ` · <span class="exp-warn">${oh.expired} expired not counted</span>` : ''}</span></div>`;
   if(rt) h += `<div class="kv ${short?'low':''}"><span>Lasts</span><span>${esc(rt)}</span></div>`;
@@ -2293,25 +2522,129 @@ function stockCard(c){
   }
   const cost = costInfo(c);
   if(cost && cost.week > 0) h += `<div class="kv"><span>Cost</span><span>${fmtMoney(cost.week)} a week · ${fmtMoney(cost.month)} a month</span></div>`;
-  h += `<div class="stock-btns"><button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add vials</button><button class="btn btn-outline" data-action="vial-new" data-id="${esc(c.id)}" aria-label="${esc(`Start a new vial of ${c.name}`)}">New vial</button></div></div>`;
+  h += `<div class="stock-btns"><button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add ${contW(c)}s</button>${inProtocol(c) ? `<button class="btn btn-outline" data-action="vial-new" data-id="${esc(c.id)}" aria-label="${esc(`Start a new ${contW(c)} of ${c.name}`)}">New ${contW(c)}</button>` : `<button class="btn btn-outline" data-action="stock-use" data-id="${esc(c.id)}">Start using</button>`}</div></div>`;
   return h;
 }
-function stepStock(cid, lineId, by){
-  const c = db.compounds.find(x=>x.id===cid), x = c && stockLines(c).find(y=>y.id===lineId); if(!x) return;
-  const n = Math.min(999, Math.max(0, x.count + by)); if(n===x.count) return;
-  x.count = n;
-  if(by > 0) delete c.orderedAt;           // vials arrived
-  save(); render();
-  const b = document.querySelector(`[data-action="${by>0?'stock-inc':'stock-dec'}"][data-line="${CSS.escape(lineId)}"]`);
-  if(b && !b.disabled) b.focus(); else if(b) { const o = document.querySelector(`[data-action="stock-inc"][data-line="${CSS.escape(lineId)}"]`); if(o) o.focus(); }
+/* One screen for everything in a compound's stock: its name and strength, the open vial or bottle, and every
+   kind of sealed vial (count, size, strength, price, expiry, batch). Nothing changes until Save. */
+function openStockDetail(cid){
+  const c = db.compounds.find(x=>x.id===cid); if(!c) return;
+  const cw = contW(c), oral = isOral(c), powder = isPowder(c), v = c.vial || {};
+  const cur = esc(String(db.settings.currency||'$').slice(0,4)), many = oral ? pieceW(c, 2) : 'mL';
+  const strIn = x => x ? round(oral ? fromMg(x, c.unit) : x, 4) : '';
+  const lineHtml = (x, i) => `<div class="sd-line" data-line="${esc(x.id || '')}" data-i="${i}">
+    <div class="sd-line-head"><b>${x.id ? `Sealed · ${esc(lineLabel(c, x))}` : `New sealed ${cw}s`}</b><button type="button" class="chip-btn chip-danger sd-remove">Remove</button></div>
+    <div class="sd-removed small" hidden>Will be removed when you save. <button type="button" class="chip-btn sd-undo">Keep</button></div>
+    <div class="sd-fields">
+      <div class="row2">
+        <div class="field"><label>How many</label><input class="sd-count" type="number" inputmode="numeric" min="0" max="999" step="1" value="${esc(x.count ?? 1)}"></div>
+        ${powder ? `<div class="field"><label>Powder per vial (mg)</label><input class="sd-powder" type="number" inputmode="decimal" min="0" step="any" value="${esc(x.powderMg || c.powderMg || '')}"></div>`
+          : `<div class="field"><label>${oral ? `${cap1(many)} per ${cw}` : 'Vial size (mL)'}</label><input class="sd-size" type="number" inputmode="decimal" min="0" step="any" value="${esc(x.sizeMl || '')}"></div>`}
+      </div>
+      ${powder ? '' : `<div class="field"><label>${oral ? `Each ${pieceW(c,1)} (${esc(uL(c.unit))})` : 'Strength (mg/mL)'}</label><input class="sd-str" type="number" inputmode="decimal" min="0" step="any" value="${esc(strIn(x.strength || c.strength))}"></div>`}
+      <div class="row2">
+        <div class="field"><label>Price per ${cw} (${cur})</label><input class="sd-price" type="number" inputmode="decimal" min="0" step="any" value="${esc(x.price || '')}"></div>
+        <div class="field"><label>Expiry date</label><input class="sd-exp" type="date" value="${esc(x.expiry || '')}"></div>
+      </div>
+      <div class="field"><label>Batch or lot number</label><input class="sd-batch" maxlength="40" autocomplete="off" value="${esc(x.batch || '')}"></div>
+    </div></div>`;
+  openSheet(`<h2>${esc(c.name)}</h2>
+    <p class="muted" style="margin-top:-6px">${inProtocol(c) ? 'Stock' : 'Stock · not in use'}</p>
+    <div class="section-label">Compound</div>
+    <div class="field"><label for="sdName">Name</label><input id="sdName" autocomplete="off" value="${esc(c.name)}"></div>
+    ${powder ? `<div class="calc" style="margin-bottom:12px">${esc(strengthLabel(c))} (${esc(c.powderMg||'')} mg in ${esc(c.waterMl||'')} mL of water)</div>`
+      : `<div class="field"><label for="sdStr">${oral ? `Each ${pieceW(c,1)} contains (${esc(uL(c.unit))})` : 'Strength (mg/mL)'}</label><input id="sdStr" type="number" inputmode="decimal" min="0" step="any" value="${esc(strIn(c.strength))}"><div class="hint" id="sdStrNote" hidden>Doses you log from now on use the new strength${inProtocol(c) && c.dosePerInj ? `, so each dose is a different ${oral ? `number of ${pieceW(c,2)}` : 'volume'}` : ''}.</div></div>`}
+    <button type="button" class="btn btn-outline btn-block" id="sdMore" style="margin-bottom:6px">${inProtocol(c) ? 'Schedule, dose and other settings' : 'Form, unit and other settings'}</button>
+    <div class="section-label">Open ${cw}</div>
+    <div class="row2">
+      <div class="field"><label for="sdVSize">${oral ? `${cap1(many)} in the ${cw}` : 'Vial size (mL)'}</label><input id="sdVSize" type="number" inputmode="decimal" min="0" step="any" placeholder="None" value="${esc(v.sizeMl || '')}"></div>
+      <div class="field"><label for="sdVLeft">Left now${oral ? '' : ' (mL)'}</label><input id="sdVLeft" type="number" inputmode="decimal" min="0" step="any" value="${v.sizeMl ? esc(round(v.remainingMl ?? v.sizeMl, 3)) : ''}"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label for="sdVPrice">Price (${cur})</label><input id="sdVPrice" type="number" inputmode="decimal" min="0" step="any" value="${esc(v.price || '')}"></div>
+      <div class="field"><label for="sdVExp">Expiry date</label><input id="sdVExp" type="date" value="${esc(v.expiry || '')}"></div>
+    </div>
+    <div class="field"><label for="sdVBatch">Batch or lot number</label><input id="sdVBatch" maxlength="40" autocomplete="off" value="${esc(v.batch || '')}"></div>
+    <div class="hint" style="margin:-6px 0 12px">Leave the size empty if nothing is open. Correcting how much is left starts the count from now.</div>
+    <div class="section-label">Sealed ${cw}s</div>
+    <div id="sdLines">${stockLines(c).map(lineHtml).join('') || `<div class="small muted" id="sdNone" style="margin-bottom:10px">No sealed ${cw}s.</div>`}</div>
+    <button type="button" class="btn btn-outline btn-block" id="sdAdd">+ Add ${stockLines(c).length ? 'another kind' : `sealed ${cw}s`}</button>
+    <div class="sheet-actions"><button class="btn btn-block" id="sdSave">Save</button><div class="form-err" id="sdErr" role="alert" style="margin-top:6px; min-height:0"></div></div>`);
+  let n = stockLines(c).length;
+  const box = $('#sdLines');
+  box.addEventListener('click', e=>{
+    const ln = e.target.closest('.sd-line'); if(!ln) return;
+    if(e.target.closest('.sd-remove') || e.target.closest('.sd-undo')){
+      const rm = !!e.target.closest('.sd-remove');
+      ln.dataset.removed = rm ? '1' : ''; ln.querySelector('.sd-fields').hidden = rm; ln.querySelector('.sd-removed').hidden = !rm; ln.querySelector('.sd-remove').hidden = rm;
+    }
+  });
+  $('#sdAdd').addEventListener('click', ()=>{
+    const none = $('#sdNone'); if(none) none.remove();
+    box.insertAdjacentHTML('beforeend', lineHtml({count:1, sizeMl: (stockLines(c)[0]||{}).sizeMl || v.sizeMl || '', strength: c.strength}, n++));
+    const last = box.lastElementChild; last.querySelector('input').focus();
+  });
+  $('#sdMore').addEventListener('click', ()=>{ closeSheet(); openCompoundSheet(c.id); });
+  if($('#sdStr')) $('#sdStr').addEventListener('input', e=>{ $('#sdStrNote').hidden = e.target.value === String(strIn(c.strength)); });
+  $('#sdSave').addEventListener('click', ()=>{
+    const err = $('#sdErr'); err.textContent = '';
+    const name = $('#sdName').value.trim();
+    if(!name) return err.textContent = 'Enter a name.';
+    let strength = c.strength;
+    if(!powder){ const sv = num($('#sdStr').value); strength = oral ? toMg(sv, c.unit) : sv; if(!(strength>0 && strength<=100000)) return err.textContent = oral ? `Enter how much each ${pieceW(c,1)} contains.` : 'Enter the strength in mg/mL.'; }
+    // open vial or bottle
+    let vial = null;
+    const vs = $('#sdVSize').value.trim();
+    if(vs){
+      const size = num(vs), leftRaw = $('#sdVLeft').value.trim(), left = leftRaw==='' ? size : num(leftRaw);
+      if(!(size>0 && size<=(oral ? 10000 : 1000))) return err.textContent = oral ? `Open ${cw}: enter how many ${many} it holds.` : 'Open vial: enter its size in mL.';
+      if(!(left>=0) || left > size) return err.textContent = `Open ${cw}: how much is left has to be between 0 and ${round(size,3)}.`;
+      const price = $('#sdVPrice').value.trim(), exp = $('#sdVExp').value;
+      if(price && !(num(price)>=0 && num(price)<=1000000)) return err.textContent = `Open ${cw}: enter the price as a number, or leave it empty.`;
+      if(exp && !okYmd(exp)) return err.textContent = `Open ${cw}: pick the expiry date, or leave it empty.`;
+      vial = vialFromSheet(c, size, left);
+      ['price','expiry','batch'].forEach(k=>delete vial[k]);
+      if(num(price)>0) vial.price = round(num(price), 2); if(exp) vial.expiry = exp;
+      const batch = $('#sdVBatch').value.trim().slice(0, 40); if(batch) vial.batch = batch;
+    }
+    // sealed lines
+    const lines = [];
+    for(const ln of box.querySelectorAll('.sd-line')){
+      if(ln.dataset.removed) continue;
+      const q = sel => ln.querySelector(sel), count = num(q('.sd-count').value);
+      const label = `Sealed ${cw}s`;
+      if(!(Number.isInteger(count) && count>=0 && count<=999)) return err.textContent = `${label}: enter how many (0 to 999).`;
+      const o = {id: ln.dataset.line || uid(), count, sizeMl:null, strength:null, powderMg:null};
+      if(powder){ o.powderMg = num(q('.sd-powder').value); if(!(o.powderMg>0 && o.powderMg<=1000000)) return err.textContent = `${label}: enter the powder in each vial, in mg.`; o.powderMg = round(o.powderMg, 6); }
+      else {
+        o.sizeMl = num(q('.sd-size').value); const sv = num(q('.sd-str').value); o.strength = oral ? toMg(sv, c.unit) : sv;
+        if(!(o.sizeMl>0 && o.sizeMl<=(oral ? 10000 : 1000))) return err.textContent = oral ? `${label}: enter how many ${many} are in each.` : `${label}: enter the vial size in mL.`;
+        if(!(o.strength>0 && o.strength<=100000)) return err.textContent = oral ? `${label}: enter how much each ${pieceW(c,1)} contains.` : `${label}: enter the strength in mg/mL.`;
+        o.sizeMl = round(o.sizeMl, 6); o.strength = round(o.strength, 6);
+      }
+      const price = q('.sd-price').value.trim(), exp = q('.sd-exp').value;
+      if(price && !(num(price)>=0 && num(price)<=1000000)) return err.textContent = `${label}: enter the price as a number, or leave it empty.`;
+      if(exp && !okYmd(exp)) return err.textContent = `${label}: pick the expiry date, or leave it empty.`;
+      o.price = num(price)>0 ? round(num(price), 2) : null; o.expiry = exp || null; o.batch = q('.sd-batch').value.trim().slice(0, 40);
+      lines.push(o);
+    }
+    if(lines.length > 20) return err.textContent = 'That’s the most kinds of vial one compound can have (20).';
+    const hadMore = lines.reduce((t,x)=>t+x.count, 0) > sealedCount(c);
+    c.name = name.slice(0, 80); c.strength = round(strength, 6); c.vial = vial;
+    if(lines.length) c.stock = lines; else delete c.stock;
+    if(hadMore) delete c.orderedAt;                // more vials than before: they arrived
+    db.logs.forEach(l=>{ if(l.compoundId===c.id) l.compoundName = c.name; });
+    save(); closeSheet(); render(); haptic(); toast('Stock saved');
+  });
 }
 function openStockSheet(cid, lineId){
   const c = db.compounds.find(x=>x.id===cid);
   if(!c){
-    if(db.compounds.length===1) return openStockSheet(db.compounds[0].id);
-    return openSheet(`<h2>Add vials</h2><p class="muted" style="margin-top:-6px">Which compound?</p><div class="card" style="padding:0 14px">${db.compounds.map(x=>`<div class="list-item tap-row" data-action="stock-add" data-id="${esc(x.id)}">
-      <div class="list-main"><div class="list-title">${esc(x.name)}</div><div class="list-sub">${esc(strengthLabel(x))}</div></div>
-      <svg class="chev" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>`).join('')}</div>`);
+    if(!db.compounds.length) return openCompoundSheet(null, {stockOnly:true, thenStock:true});
+    return openSheet(`<h2>Add stock</h2><p class="muted" style="margin-top:-6px">Which compound?</p><div class="card" style="padding:0 14px">${db.compounds.map(x=>`<div class="list-item tap-row" data-action="stock-add" data-id="${esc(x.id)}">
+      <div class="list-main"><div class="list-title">${esc(x.name)}</div><div class="list-sub">${esc(strengthLabel(x))}${inProtocol(x) ? '' : ' · not in use'}</div></div>
+      <svg class="chev" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>`).join('')}</div>
+      <button class="btn btn-outline btn-block" data-action="stock-new">Something new (not in your protocol)</button>`);
   }
   const powder = isPowder(c), line = lineId ? stockLines(c).find(x=>x.id===lineId) : null;
   if(lineId && !line) return;
@@ -2321,41 +2654,43 @@ function openStockSheet(cid, lineId){
   const pow0 = line ? line.powderMg : c.powderMg || '';
   const price0 = line ? line.price : last && last.price ? last.price : '';
   const moreOpen = line && (line.price || line.expiry || line.batch);
-  openSheet(`<h2>${line ? 'Sealed vials' : 'Add vials'}</h2>
+  const cw = contW(c), oral = isOral(c);
+  openSheet(`<h2>${line ? `Sealed ${cw}s` : `Add ${cw}s`}</h2>
     <p class="muted" style="margin-top:-6px">${esc(c.name)}</p>
-    <div class="field"><label for="sCount">${line ? 'How many you have' : 'How many vials'}</label><input id="sCount" type="number" inputmode="numeric" min="${line?0:1}" max="999" step="1" value="${line ? line.count : 1}"></div>
+    <div class="field"><label for="sCount">${line ? 'How many you have' : `How many ${cw}s`}</label><input id="sCount" type="number" inputmode="numeric" min="${line?0:1}" max="999" step="1" value="${line ? line.count : 1}"></div>
     ${powder ? `<div class="field"><label for="sPowder">Powder per vial (mg)</label><input id="sPowder" type="number" inputmode="decimal" min="0" step="any" value="${esc(pow0)}"></div>`
-      : `<div class="row2"><div class="field"><label for="sSize">Vial size (mL)</label><input id="sSize" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 10" value="${esc(size0)}"></div>
-        <div class="field"><label for="sStr">Strength (mg/mL)</label><input id="sStr" type="number" inputmode="decimal" min="0" step="any" value="${esc(str0||'')}"></div></div>`}
+      : `<div class="row2"><div class="field"><label for="sSize">${oral ? `${cap1(pieceW(c,2))} per ${cw}` : 'Vial size (mL)'}</label><input id="sSize" type="number" inputmode="decimal" min="0" step="any" placeholder="${oral ? 'e.g. 60' : 'e.g. 10'}" value="${esc(size0)}"></div>
+        <div class="field"><label for="sStr">${oral ? `Each ${pieceW(c,1)} (${esc(uL(c.unit))})` : 'Strength (mg/mL)'}</label><input id="sStr" type="number" inputmode="decimal" min="0" step="any" value="${esc(str0 ? (oral ? round(fromMg(str0, c.unit), 4) : str0) : '')}"></div></div>`}
     <details class="more" ${moreOpen?'open':''}><summary>Price, expiry and batch</summary>
       <div class="row2">
-        <div class="field"><label for="sPrice">Price per vial (${esc(String(db.settings.currency||'$').slice(0,4))})</label><input id="sPrice" type="number" inputmode="decimal" min="0" step="any" value="${esc(price0||'')}"></div>
+        <div class="field"><label for="sPrice">Price per ${cw} (${esc(String(db.settings.currency||'$').slice(0,4))})</label><input id="sPrice" type="number" inputmode="decimal" min="0" step="any" value="${esc(price0||'')}"></div>
         <div class="field"><label for="sExp">Expiry date</label><input id="sExp" type="date" value="${esc(line && line.expiry || '')}"></div>
       </div>
       <div class="field"><label for="sBatch">Batch or lot number</label><input id="sBatch" maxlength="40" autocomplete="off" value="${esc(line && line.batch || '')}"></div>
-      <div class="hint" style="margin:-6px 0 12px">All optional. With a price, the Stock tab shows what each compound costs a week and a month. Vials with an expiry date are warned about 30 days ahead, and the soonest to expire is opened first.</div>
+      <div class="hint" style="margin:-6px 0 12px">All optional. With a price, the Stock tab shows what each compound costs a week and a month. ${cap1(cw)}s with an expiry date are warned about 30 days ahead, and the soonest to expire is opened first.</div>
     </details>
     <div class="calc" id="sCalc"></div>
     <button class="btn btn-block" id="sSave">${line ? 'Save' : 'Add to stock'}</button><div class="form-err" id="sErr" role="alert"></div>
-    ${line ? `<button class="btn btn-danger btn-block" style="margin-top:10px" id="sDel">Remove these vials from Stock</button>` : ''}`);
+    ${line ? `<button class="btn btn-danger btn-block" style="margin-top:10px" id="sDel">Remove these ${cw}s from Stock</button>` : ''}`);
   const read = ()=>{
     const count = num($('#sCount').value);
-    const x = powder ? {powderMg: num($('#sPowder').value)} : {sizeMl: num($('#sSize').value), strength: num($('#sStr').value)};
+    const x = powder ? {powderMg: num($('#sPowder').value)} : {sizeMl: num($('#sSize').value), strength: oral ? toMg(num($('#sStr').value), c.unit) : num($('#sStr').value)};
     return {count, x, price: num($('#sPrice').value), expiry: $('#sExp').value, batch: $('#sBatch').value.trim().slice(0, 40)};
   };
   const calc = ()=>{
     const {count, x, price} = read(), each = sealedMg(c, x);
-    const money = price>0 ? ` · ${fmtMoney(price / each)} per mg` : '';
-    $('#sCalc').textContent = each>0 && count>=0 ? `${fmtStock(each, c.unit)} per vial${count>1 ? ` · ${fmtStock(each*count, c.unit)} in all` : ''}${price>0 && each>0 ? money : ''}` : '';
+    // orals: price per tablet (a price per mg of a cheap supplement rounds to nothing, and IU isn't mg)
+    const money = oral ? (x.sizeMl>0 ? ` · ${moneyText(price / x.sizeMl)} per ${pieceW(c,1)}` : '') : ` · ${moneyText(price / each)} per mg`;
+    $('#sCalc').textContent = each>0 && count>=0 ? `${fmtStock(each, c.unit)} per ${cw}${count>1 ? ` · ${fmtStock(each*count, c.unit)} in all` : ''}${price>0 && each>0 ? money : ''}` : '';
   };
   $('#sheetRoot .sheet').addEventListener('input', calc); calc();
   $('#sSave').addEventListener('click', ()=>{
     const {count, x, price, expiry, batch} = read(), err = $('#sErr');
-    if(!(Number.isInteger(count) && count >= (line?0:1) && count <= 999)) return err.textContent = line ? 'Enter how many you have: 0 to 999.' : 'Enter how many vials: 1 to 999.';
+    if(!(Number.isInteger(count) && count >= (line?0:1) && count <= 999)) return err.textContent = line ? 'Enter how many you have: 0 to 999.' : `Enter how many ${cw}s: 1 to 999.`;
     if(powder){ if(!(x.powderMg>0 && x.powderMg<=1000000)) return err.textContent = 'Enter the powder in each vial, in mg.'; }
     else {
-      if(!(x.sizeMl>0 && x.sizeMl<=1000)) return err.textContent = 'Enter the vial size in mL.';
-      if(!(x.strength>0 && x.strength<=100000)) return err.textContent = 'Enter the strength in mg/mL.';
+      if(!(x.sizeMl>0 && x.sizeMl<=(oral ? 10000 : 1000))) return err.textContent = oral ? `Enter how many ${pieceW(c,2)} are in each ${cw}.` : 'Enter the vial size in mL.';
+      if(!(x.strength>0 && x.strength<=100000)) return err.textContent = oral ? `Enter how much each ${pieceW(c,1)} contains.` : 'Enter the strength in mg/mL.';
     }
     if($('#sPrice').value.trim() && !(price>=0 && price<=1000000)) return err.textContent = 'Enter the price as a number, or leave it empty.';
     if(expiry && !okYmd(expiry)) return err.textContent = 'Pick the expiry date, or leave it empty.';
@@ -2516,7 +2851,7 @@ function parseBackup(text){
     activities: Array.isArray(d.activities)?d.activities:[], checkins: d.checkins || [], programmes: d.programmes || [], measures: d.measures || [], settings: d.settings||{}, exportedAt: validDate(d.exportedAt) ? d.exportedAt : null};
 }
 function backupSummary(p){
-  return `Found <b>${p.compounds.length}</b> compounds, <b>${p.logs.length}</b> injections, <b>${p.labs.length}</b> lab results, <b>${p.workouts.length}</b> workouts, <b>${p.activities.length}</b> runs/walks/hikes, <b>${(p.checkins||[]).length}</b> check-ins${p.exportedAt?` · saved ${esc(fmtDate(p.exportedAt))} ${esc(fmtTime(p.exportedAt))}`:''}.`;
+  return `Found <b>${p.compounds.length}</b> compounds, <b>${p.logs.length}</b> doses, <b>${p.labs.length}</b> lab results, <b>${p.workouts.length}</b> workouts, <b>${p.activities.length}</b> runs/walks/hikes, <b>${(p.checkins||[]).length}</b> check-ins${p.exportedAt?` · saved ${esc(fmtDate(p.exportedAt))} ${esc(fmtTime(p.exportedAt))}`:''}.`;
 }
 /* A copy of everything taken just before a restore or import, so it can be undone. */
 const SNAP_KEY = 'inj-data-v2-before-change';
@@ -2538,10 +2873,11 @@ function applyBackup(parsed){
   // these belong to this phone: privacy and security choices, its band, Google account, watch-data link, calendar export
   const PHONE_KEYS = ['lockEnabled','lockAfter','autoBackup','lastBackupAt','lastBackupFile','lastBackupError','reminders','secureScreen','privateNotifs',
     'health','hr','gdrive','backupCrypto','purgePlainLocal','purgePlainDrive','calUntil','calSig','calCount','calNudgeOff','installHintOff'];
-  const local = {};
+  const local = {}, seeded = !!db.settings.tplSeeded;
   PHONE_KEYS.forEach(k=>{ if(k in db.settings) local[k] = db.settings[k]; });
   const fromBackup = Object.assign({}, parsed.settings); PHONE_KEYS.forEach(k=>{ delete fromBackup[k]; });
   db.settings = Object.assign({}, DEFAULT_SETTINGS, fromBackup, local);
+  if(seeded) db.settings.tplSeeded = true;       // an older backup mustn't bring back starter templates you deleted here
   // keep encrypting after restoring an encrypted backup on a new phone (same password); otherwise don't claim
   // encryption this phone has no key for
   if(parsed._crypto && !local.backupCrypto){
@@ -2661,7 +2997,7 @@ function renderGoogleCard(){
   const G = gdPlugin(), c = gdCfg();
   let html = `<div class="section-label">Google account</div><div class="card">`;
   if(!G) return html + `<p class="small muted" style="margin:0">Sign in with Google to back everything up to your Google Drive. Available in the Android app.</p></div>`;
-  if(!c.email) return html + `<p class="small" style="margin:0 0 12px">Sign in to back up everything (injections, training, labs, health, settings) to a private folder in your Google Drive, and restore it on a new phone.</p>
+  if(!c.email) return html + `<p class="small" style="margin:0 0 12px">Sign in to back up everything (protocol, training, labs, health, settings) to a private folder in your Google Drive, and restore it on a new phone.</p>
     <button class="btn btn-block" data-action="gd-signin">Sign in with Google</button></div>`;
   html += `<div class="kv"><span>Signed in</span><span>${esc(c.email)}</span></div>
     <div class="kv"><span>Last Drive backup</span><span>${c.lastAt ? esc(fmtDate(c.lastAt)+' '+fmtTime(c.lastAt)) : 'Not yet'}</span></div>
@@ -2799,8 +3135,8 @@ function openReportSheet(){
     <div class="field"><label for="rName">Name on report (optional)</label><input id="rName" autocomplete="name" value="${esc(s.reportName||'')}" placeholder="Your name"></div>
     <div class="field"><span class="field-label">Include</span>
       <label class="switch-row"><span>Estimated levels charts</span><span class="switch"><input type="checkbox" id="rCharts" ${s.reportCharts!==false?'checked':''}><span></span></span></label>
-      <label class="switch-row"><span>Full injection log</span><span class="switch"><input type="checkbox" id="rLog" ${s.reportLog!==false?'checked':''}><span></span></span></label>
-      <label class="switch-row"><span>Notes on injections</span><span class="switch"><input type="checkbox" id="rNotes" ${s.reportNotes?'checked':''}><span></span></span></label>
+      <label class="switch-row"><span>Full dose log</span><span class="switch"><input type="checkbox" id="rLog" ${s.reportLog!==false?'checked':''}><span></span></span></label>
+      <label class="switch-row"><span>Notes on doses</span><span class="switch"><input type="checkbox" id="rNotes" ${s.reportNotes?'checked':''}><span></span></span></label>
       ${(db.checkins||[]).length ? `<label class="switch-row"><span>How I felt (check-ins)</span><span class="switch"><input type="checkbox" id="rFeel" ${s.reportFeel!==false?'checked':''}><span></span></span></label>` : ''}
       ${''}
     </div>
@@ -2831,11 +3167,11 @@ async function deliverPdf(doc, name){
     const b64 = doc.output('datauristring').split(',')[1];
     const r = await FS.writeFile({path:name, data:b64, directory:'CACHE'});
     suppressLockOnce();
-    try{ await Share.share({title:'Injection report', files:[r.uri], dialogTitle:'Send or save report'}); }
+    try{ await Share.share({title:'Doctor report', files:[r.uri], dialogTitle:'Send or save report'}); }
     catch(e){ if(!/cancel/i.test(String(e && e.message))) throw e; }
     return;
   }
-  if(webApp()){ await webSaveFile(doc.output('blob'), name, 'Injection report'); return; }
+  if(webApp()){ await webSaveFile(doc.output('blob'), name, 'Doctor report'); return; }
   // browser: open the PDF in a new tab (downloads may be blocked)
   const url = URL.createObjectURL(doc.output('blob'));
   const w = window.open(url, '_blank');
@@ -2898,7 +3234,7 @@ function buildReport(jsPDF, opts){
   // ---- title block
   doc.setFillColor(...PAPER); doc.rect(0,0,W,40,'F');
   doc.setFont('helvetica','bold'); doc.setFontSize(20); doc.setTextColor(...INK);
-  doc.text(D.labs.length ? 'Injection & blood test report' : 'Injection report', M, 20);
+  doc.text(D.labs.length ? 'Protocol & blood test report' : 'Protocol report', M, 20);
   doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
   const who = opts.name ? `${opts.name}  ·  ` : '';
   doc.text(`${who}Period ${fmtD(D.start)} – ${fmtD(D.end)}  ·  Generated ${fmtD(new Date())}`, M, 28);
@@ -2913,9 +3249,10 @@ function buildReport(jsPDF, opts){
   const lastTest = tests[tests.length-1];
   const summary = [
     ['Compounds', (()=>{ const fin = c=>{ const cy = cycleState(c); return cy && cy.state==='done'; };
-      const nAct = db.compounds.filter(c=>!currentPause(c) && !fin(c)).length, nP = db.compounds.filter(c=>currentPause(c) && !fin(c)).length, nF = db.compounds.filter(fin).length;
+      const cs = db.compounds.filter(inProtocol);
+      const nAct = cs.filter(c=>!currentPause(c) && !fin(c)).length, nP = cs.filter(c=>currentPause(c) && !fin(c)).length, nF = cs.filter(fin).length;
       return `${nAct} active${nP ? `, ${nP} paused` : ''}${nF ? `, ${nF} finished cycle${nF===1?'':'s'}` : ''}`; })()],
-    ['Injections logged', String(taken)],
+    ['Doses logged', String(taken)],
     ['Doses taken as scheduled', allSched ? `${Math.round(allTaken/allSched*100)}% (${allTaken} of ${allSched})` : '—'],
     ['Blood tests', tests.length ? `${tests.length} in period${lastTest ? `, latest ${fmtD(lastTest.at)}${labTimingText(lastTest.at) ? ' (' + labTimingText(lastTest.at) + ')' : ''}` : ''}` : 'None in period'],
   ];
@@ -2924,18 +3261,20 @@ function buildReport(jsPDF, opts){
 
   // ---- current regimen
   heading('Current regimen');
-  const reg = db.compounds.map(c=>{
+  const reg = db.compounds.filter(inProtocol).map(c=>{
     const notes = [];
     const cyr = cycleState(c); if(cyr) notes.push(`${cyr.state==='done' ? 'Cycle finished' : cyr.state==='before' ? 'Cycle planned' : 'Cycle'}: ${cycleLengthText(c.cycle)}, ${fmtD(parseYmd(cyr.start))} to ${fmtD(parseYmd(cyr.lastDay))}`);
     const pz = currentPause(c); if(pz) notes.push(`Paused since ${fmtD(parseYmd(pz.from))}${pz.to?` until ${fmtD(parseYmd(pz.to))}`:''}`);
     const nx = nextDoseChange(c); if(nx) notes.push(`${fmtAmt(nx.dose,c.unit)} from ${fmtD(parseYmd(nx.from))}`);
     if(c.halfLife) notes.push(`Half-life ${c.halfLife} d (entered)`);
-    const strength = c.form==='powder' && c.powderMg ? `${c.powderMg} mg + ${c.waterMl} mL water (${round(c.strength,3)} mg/mL)` : `${round(c.strength,3)} mg/mL`;
+    if(isOral(c) && c.supplement) notes.unshift('Supplement');
+    const strength = c.form==='powder' && c.powderMg ? `${c.powderMg} mg + ${c.waterMl} mL water (${round(c.strength,3)} mg/mL)` : strengthText(c);
     const pv = plannedVol(c);
-    return [c.name, strength, c.dosePerInj ? `${fmtAmt(c.dosePerInj,c.unit)}${pv?`\n${round(pv,2)} mL${pv<=1?` / ${round(pv*100,1)} U`:''}`:''}` : '—',
-            scheduleLabel(c), c.route, notes.join('\n')];
+    const per = isOral(c) ? (pv ? `\n${takeText(c, pv)}` : '') : pv ? `\n${round(pv,2)} mL${pv<=1?` / ${round(pv*100,1)} U`:''}` : '';
+    return [c.name, strength, c.dosePerInj ? `${fmtAmt(c.dosePerInj,c.unit)}${per}` : '—',
+            scheduleLabel(c), isOral(c) ? 'Oral' : c.route, notes.join('\n')];
   });
-  at({...tableBase, startY:y, head:[['Compound','Strength','Dose / injection','Schedule','Route','Notes']], body:reg.length?reg:[['No compounds','','','','','']],
+  at({...tableBase, startY:y, head:[['Compound','Strength','Dose','Schedule','Route','Notes']], body:reg.length?reg:[['No compounds','','','','','']],
       columnStyles:{0:{fontStyle:'bold', cellWidth:28}, 1:{cellWidth:32}, 2:{cellWidth:27}, 4:{cellWidth:13}}});
   y = doc.lastAutoTable.finalY + 6;
 
@@ -3029,7 +3368,7 @@ function buildReport(jsPDF, opts){
       y = doc.lastAutoTable.finalY + 4;
     }
     y -= 2;
-    para('H / L = above / below the reference range printed on the lab report. "Time since last dose" is from the injection log.', 7.5, MUTED);
+    para('H / L = above / below the reference range printed on the lab report. "Time since last dose" is from the dose log (supplements left out).', 7.5, MUTED);
     y += 3;
   }
 
@@ -3079,12 +3418,12 @@ function buildReport(jsPDF, opts){
 
   // ---- injection log
   if(opts.log && D.logs.length){
-    heading('Injection log');
-    const head = ['Date','Time','Compound','Dose','Volume','Site'].concat(opts.notes ? ['Notes'] : []);
+    heading('Dose log');
+    const head = ['Date','Time','Compound','Dose','Amount','Site'].concat(opts.notes ? ['Notes'] : []);
     const body = D.logs.slice().reverse().map(l=>{
-      const vol = l.volumeMl ?? (l.strength ? l.dose/l.strength : null);
+      const lc = db.compounds.find(x=>x.id===l.compoundId), vt = l.skipped ? '' : logVolText(l, lc).replace(/ \(.*\)$/, '');
       const row = [fmtD(l.date), new Date(l.date).toLocaleTimeString('en-AU',{hour:'numeric', minute:'2-digit'}), l.compoundName || '',
-        l.skipped ? 'Skipped' : fmtAmt(l.dose, l.unit), l.skipped || vol==null ? '' : `${round(vol,2)} mL`, l.site || ''];
+        l.skipped ? 'Skipped' : fmtAmt(l.dose, l.unit), vt, l.site || (isOral(lc) || l.piece ? 'Oral' : '')];
       if(opts.notes) row.push(l.notes || '');
       return row;
     });
@@ -3177,7 +3516,7 @@ async function doScheduleReminders(force){
       if(n.id === REST_NOTIF_ID || n.id === WEEKLY_NOTIF_ID) return false;   // rest timer / weekly report: leave alone
       if(n.id < SNOOZE_BASE) return true;
       const ids = (n.extra && n.extra.ids) || [];
-      return !ids.some(id=>{ const c = db.compounds.find(c=>c.id===id); return c && statusFor(c).due; });
+      return !ids.some(id=>{ const c = db.compounds.find(c=>c.id===id); return c && dueFor(c, n.extra && n.extra.time); });
     });
     if(drop.length) await LN.cancel({notifications: drop.map(n=>({id:n.id}))});
     const plan = plannerEvents();
@@ -3188,24 +3527,26 @@ async function doScheduleReminders(force){
       if(!hasSchedule(c)) return;
       timeline(c, today, until).forEach(t=>{
         if(t.status==='taken' || t.status==='skipped') return;
-        const [h,m] = hm(c.time==='night' ? db.settings.night : db.settings.morning);
+        const tm = slotTime(c, t);
+        const [h,m] = hm(tm==='night' ? db.settings.night : db.settings.morning);
         const at = new Date(t.day); at.setHours(h,m,0,0);
         if(at <= now) return;
-        const key = `${ymd(t.day)}|${c.time}`;
-        const g = (groups[key] = groups[key] || {at, items:[], ids:[]});
+        const key = `${ymd(t.day)}|${tm}`;
+        const g = (groups[key] = groups[key] || {at, items:[], ids:[], supp:0});
         const dd = doseOn(c, t.day);
-        g.items.push(`${c.name}${dd?' '+fmtAmt(dd,c.unit):''}`); g.ids.push(c.id);
+        if(isOral(c) && c.supplement) g.supp++; else g.items.push(`${c.name}${dd?' '+fmtAmt(dd,c.unit):''}`);
+        g.ids.push(c.id);
       });
     });
     const notifications = Object.entries(groups).map(([key, g])=>{
       const [d, time] = key.split('|');
       return {
         id: (Number(d.replace(/-/g,''))*10 + (time==='night'?1:0)) % 2147483647,
-        title: db.settings.privateNotifs ? 'Reminder' : (g.items.length>1 ? `${g.items.length} injections due` : 'Injection due'),
-        body: db.settings.privateNotifs ? 'You have something scheduled. Tap to open.' : g.items.join(' · '),
+        title: db.settings.privateNotifs ? 'Reminder' : (g.ids.length>1 ? `${g.ids.length} doses due` : 'Dose due'),
+        body: db.settings.privateNotifs ? 'You have something scheduled. Tap to open.' : g.items.concat(g.supp ? [`${g.supp} ${g.supp===1?'supplement':'supplements'}`] : []).join(' · '),
         schedule: {at: g.at, allowWhileIdle: true},
         channelId: 'doses', smallIcon: 'ic_stat_injection',
-        actionTypeId: 'DOSE', extra: {ids: g.ids, day: d}
+        actionTypeId: 'DOSE', extra: {ids: g.ids, day: d, time}
       };
     });
     // stock, blood test and check-in reminders (only with notification permission; they're never asked for from here)
@@ -3220,7 +3561,7 @@ async function doScheduleReminders(force){
     if(notifications.length) await LN.schedule({notifications});
   }catch(e){ lastRemSig = null; console.warn('reminders', e); }
 }
-/* Dated reminders besides doses: reorder, expiring vials, the next blood test, and the daily check-in. */
+/* Dated reminders besides doses: reorder, expiring stock, the next blood test, and the daily check-in. */
 const PLAN_BASE = 1900000400;
 function plannerEvents(){
   const s = db.settings, out = [], now = new Date(), today = dayStart(now);
@@ -3230,11 +3571,11 @@ function plannerEvents(){
       const ro = reorderInfo(c);
       if(ro && !ro.ordered) out.push({at: at(ro.due ? addDays(today, 1) : ro.by, s.morning), title: 'Time to reorder',
         body: `${c.name}: your stock lasts until about ${fmtShortY(ro.runway.last || today)}. Delivery takes about ${leadDays()} days.`, route: 'stock'});
-      const exps = stockLines(c).filter(x=>x.count>0 && x.expiry).map(x=>({k:x.expiry, what:`${x.count} sealed ${x.count===1?'vial':'vials'}${x.batch ? ` (batch ${x.batch})` : ''}`}));
-      if(c.vial && c.vial.expiry && (c.vial.remainingMl ?? c.vial.sizeMl) > 0) exps.push({k:c.vial.expiry, what:'your open vial'});
+      const exps = stockLines(c).filter(x=>x.count>0 && x.expiry).map(x=>({k:x.expiry, what:`${x.count} sealed ${x.count===1?contW(c):contW(c)+'s'}${x.batch ? ` (batch ${x.batch})` : ''}`}));
+      if(c.vial && c.vial.expiry && (c.vial.remainingMl ?? c.vial.sizeMl) > 0) exps.push({k:c.vial.expiry, what:`your open ${contW(c)}`});
       exps.forEach(e=>{
-        out.push({at: at(addDays(parseYmd(e.k), -30), s.morning), title: 'Vials expire in 30 days', body: `${c.name}: ${e.what} ${e.what.startsWith('your') ? 'expires' : 'expire'} ${fmtShortY(parseYmd(e.k))}.`, route: 'stock'});
-        out.push({at: at(parseYmd(e.k), s.morning), title: 'Vials expire today', body: `${c.name}: ${e.what} ${e.what.startsWith('your') ? 'expires' : 'expire'} today.`, route: 'stock'});
+        out.push({at: at(addDays(parseYmd(e.k), -30), s.morning), title: e.what.startsWith('your') ? `Your open ${contW(c)} expires in 30 days` : `${cap1(contW(c))}s expire in 30 days`, body: `${c.name}: ${e.what} ${e.what.startsWith('your') ? 'expires' : 'expire'} ${fmtShortY(parseYmd(e.k))}.`, route: 'stock'});
+        out.push({at: at(parseYmd(e.k), s.morning), title: `${cap1(contW(c))}s expire today`, body: `${c.name}: ${e.what} ${e.what.startsWith('your') ? 'expires' : 'expire'} today.`, route: 'stock'});
       });
     });
     
@@ -3249,17 +3590,25 @@ function plannerEvents(){
 }
 const SNOOZE_BASE = 2000000000;
 /* Log the planned dose for each compound in a reminder, at the suggested site. */
-function quickLog(ids){
+/* is this compound's dose still to take? For twice-daily ones, the morning or night dose a reminder was for */
+function dueFor(c, time){
+  if(perDay(c)!==2 || !time) return statusFor(c).due;
+  if(!statusFor(c).due) return false;
+  const today = dayStart(new Date());
+  const t = timeline(c, today, today).find(x=>x.slot===(time==='night' ? 1 : 0));
+  return !!t && t.status==='due';
+}
+function quickLog(ids, time){
   const done = [], needInput = [];
   const now = new Date();
   ids.forEach(id=>{
     const c = db.compounds.find(c=>c.id===id); if(!c) return;
-    const st = statusFor(c);
-    if(!st.due) return;                        // already logged since the reminder
+    if(!dueFor(c, time)) return;                        // already logged since the reminder
     const dose = doseOn(c, now) || c.dosePerInj;      // today's planned dose, even if a change started overnight
     if(!(dose>0) || !(c.strength>0)){ needInput.push(c); return; }
-    const site = suggestSite(c.route, c), vol = dose / c.strength;
-    const log = {id:uid(), compoundId:c.id, compoundName:c.name, strength:c.strength, unit:c.unit, dose, volumeMl:vol, date:now.toISOString(), site, notes:''};
+    const site = isOral(c) ? null : suggestSite(c.route, c), vol = dose / c.strength;
+    const log = {id:uid(), compoundId:c.id, compoundName:c.name, strength:c.strength, unit:c.unit, dose, volumeMl:vol, date:now.toISOString(), site, notes:'', ...(isOral(c) ? {piece:c.piece||'tablet'} : {}),
+      ...(perDay(c)===2 && (time==='morning' || time==='night') ? {slot: time==='night' ? 1 : 0} : {})};   // counts as the dose the reminder was for
     db.logs.push(log); adjustStock(c.id, -vol); done.push(log);
   });
   if(done.length) save();
@@ -3281,17 +3630,17 @@ async function handleNotificationAction(a){
   if(extra.route === 'checkin'){ ui.mode = 'inj'; ui.tab = 'today'; render(); openCheckinSheet(okYmd(extra.day) && extra.day <= ymd(new Date()) ? extra.day : ymd(new Date())); return; }
   ui.mode = 'inj'; ui.tab = 'today';
   if(a.actionId==='log'){
-    const {done, needInput} = quickLog(ids);
+    const {done, needInput} = quickLog(ids, extra.time);
     render();
     if(done.length){
       haptic('success');
-      toast(`Logged ${done.map(l=>`${l.compoundName} ${fmtAmt(l.dose,l.unit)} · ${l.site}`).join(', ')}`, {label:'Undo', fn:()=>undoLogs(done)});
+      toast(`Logged ${done.map(l=>`${l.compoundName} ${fmtAmt(l.dose,l.unit)}${l.site ? ' · ' + l.site : ''}`).join(', ')}`, {label:'Undo', fn:()=>undoLogs(done)});
     } else if(!needInput.length) toast('Already logged');
     if(needInput.length) openLogSheet({compoundId: needInput[0].id});
   } else if(a.actionId==='snooze' && LN){
     try{
       await LN.schedule({notifications:[{
-        id: SNOOZE_BASE + Math.floor(Math.random()*1e8), title: n.title || 'Injection due', body: n.body || '',
+        id: SNOOZE_BASE + Math.floor(Math.random()*1e8), title: n.title || 'Dose due', body: n.body || '',
         schedule: {at: new Date(Date.now() + 3600e3), allowWhileIdle: true},
         channelId: 'doses', smallIcon: 'ic_stat_injection', actionTypeId: 'DOSE', extra
       }]});
@@ -3337,7 +3686,7 @@ async function testNotification(){
   try{
     let p = await LN.checkPermissions(); if(p.display!=='granted') p = await LN.requestPermissions();
     if(p.display!=='granted') return toast('Notifications are turned off for this app in Android settings.');
-    await LN.schedule({notifications:[{id:1, title:'Enhanced Training Studio', body:'Reminders are working.', schedule:{at:new Date(Date.now()+3000)}, channelId:'doses', smallIcon:'ic_stat_injection', actionTypeId:'DOSE', extra:{ids:[], day:ymd(new Date())}}]});
+    await LN.schedule({notifications:[{id:1, title:'Enhanced Training Studio', body:'Reminders are working.', schedule:{at:new Date(Date.now()+3000)}, channelId:'doses', smallIcon:'ic_stat_injection', extra:{route:'test'}}]});   // no Log/Snooze buttons: there's no dose
     toast('Test notification in 3 seconds');
   }catch(e){ toast('Could not send a notification.'); }
 }
@@ -3354,9 +3703,10 @@ document.addEventListener('click', e=>{
   const id = a.dataset.id;
   
   switch(a.dataset.action){
-    case 'log': openLogSheet({compoundId:id, day:a.dataset.day}); break;
+    case 'log': openLogSheet({compoundId:id, day:a.dataset.day, slot: a.dataset.slot==='0' ? 0 : a.dataset.slot==='1' ? 1 : undefined}); break;
     case 'log-edit': openLogSheet({logId:id}); break;
-    case 'skip': if(a.dataset.day) skipDose(id, a.dataset.day); else armButton(a, 'Confirm skip', ()=>skipDose(id)); break;
+    case 'skip': { const sl = a.dataset.slot==='0' ? 0 : a.dataset.slot==='1' ? 1 : undefined;
+      if(a.dataset.day) skipDose(id, a.dataset.day, sl); else armButton(a, 'Confirm skip', ()=>skipDose(id, undefined, sl)); } break;
     case 'compound-add': openCompoundSheet(); break;
     case 'backup-pass': openBackupPassword(); break;
     case 'skip-all': skipAllMissed(id); break;
@@ -3364,12 +3714,19 @@ document.addEventListener('click', e=>{
     case 'compound-edit': openCompoundSheet(id); break;
     case 'vial-new': newVial(id); break;
     case 'stock-add': openStockSheet(id); break;
+    case 'stock-detail': openStockDetail(id); break;
+    case 'stock-new': closeSheet(); openCompoundSheet(null, {stockOnly:true, thenStock:true}); break;
+    case 'stock-use': closeSheet(); openCompoundSheet(id, {startUsing:true}); break;
+    case 'supp-take': case 'supp-all': {
+      const ids = a.dataset.action==='supp-all' ? db.compounds.filter(c=>isOral(c) && c.supplement && statusFor(c).dueToday).map(c=>c.id) : [id];
+      const {done, needInput} = quickLog(ids); render();
+      if(done.length){ haptic('success'); toast((done.length===1 ? `Logged ${done[0].compoundName} ${fmtAmt(done[0].dose, done[0].unit)}` : `Logged ${done.length} supplements`) + (needInput.length > 1 ? `. ${needInput.length} need a dose set first.` : ''), {label:'Undo', fn:()=>undoLogs(done)}); }
+      if(needInput.length) openLogSheet({compoundId: needInput[0].id});
+    } break;
     case 'checkin-open': openCheckinSheet(a.dataset.day); break;
     case 'checkin-skip': db.settings.checkinSkip = ymd(new Date()); save(); render(); break;
     case 'feel-pick': ui.feel = a.dataset.k; render(); break;
     case 'stock-edit': openStockSheet(id, a.dataset.line); break;
-    case 'stock-inc': stepStock(id, a.dataset.line, 1); break;
-    case 'stock-dec': stepStock(id, a.dataset.line, -1); break;
     case 'stock-ordered': { const c = db.compounds.find(x=>x.id===id); if(c){ c.orderedAt = ymd(new Date()); save(); render(); toast('Marked as ordered. Add the vials when they arrive.'); } } break;
     case 'go-stock': ui.mode = 'inj'; ui.tab = 'stock'; render(); $('#main').scrollTop = 0; break;
     case 'chart-compound': ui.chartCompound = id; render(); break;
@@ -3450,8 +3807,13 @@ document.addEventListener('input', e=>{
 document.addEventListener('change', e=>{
   const t = e.target;
   if(t.id==='setRem') enableReminders(t.checked);
-  else if(t.id==='setMorning' && t.value){ db.settings.morning = t.value; save(); }
-  else if(t.id==='setNight' && t.value){ db.settings.night = t.value; save(); }
+  else if((t.id==='setMorning' || t.id==='setNight') && t.value){
+    const m = t.id==='setMorning' ? t.value : db.settings.morning, n = t.id==='setNight' ? t.value : db.settings.night;
+    if(!HM_RE.test(t.value)) { t.value = t.id==='setMorning' ? db.settings.morning : db.settings.night; return; }
+    if(m < '04:00'){ t.value = db.settings.morning; return toast('The morning time can be from 4:00 am. A dose logged before 4 am counts for the night before.'); }
+    if(n <= m){ t.value = t.id==='setMorning' ? db.settings.morning : db.settings.night; return toast('The night time has to be later than the morning time.'); }
+    db.settings.morning = m; db.settings.night = n; save();
+  }
   else if(t.id==='setLock'){ setLockEnabled(t.checked); }
   else if(t.id==='setLockAfter'){ db.settings.lockAfter = +t.value; save(); }
   
@@ -3534,8 +3896,8 @@ function initNative(){
   }
   if(LN){
     
-    LN.createChannel && LN.createChannel({id:'planner', name:'Stock and planning', description:'Reorder, expiring vials, blood tests and the daily check-in', importance:3, visibility:0}).catch(()=>{});
-    LN.createChannel && LN.createChannel({id:'doses', name:'Dose reminders', description:'Reminders on scheduled injection days', importance:4, visibility:0, vibration:true}).catch(()=>{});
+    LN.createChannel && LN.createChannel({id:'planner', name:'Stock and planning', description:'Reorder, expiring stock, blood tests and the daily check-in', importance:3, visibility:0}).catch(()=>{});
+    LN.createChannel && LN.createChannel({id:'doses', name:'Dose reminders', description:'Reminders on scheduled dose days', importance:4, visibility:0, vibration:true}).catch(()=>{});
     LN.registerActionTypes && LN.registerActionTypes({types:[{id:'DOSE', actions:[
       {id:'log', title:'Log now', foreground:true},
       {id:'snooze', title:'Snooze 1 h', foreground:true}

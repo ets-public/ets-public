@@ -1,0 +1,17 @@
+# F-Droid repository settings. Written by ets-web/scripts/free-release.mjs: edit it there, not here.
+# No secrets in this file: the signing key and its password come from the GitHub secrets while the workflow runs.
+repo_url: https://ets-public.github.io/ets-public/repo
+repo_name: Enhanced Training Studio
+repo_description: >-
+  Enhanced Training Studio, published by its developer: the same app, signed with the same key, as the downloads on https://enhancedtraining.app.
+  Tracking your protocol is free; training, blood tests and health unlock with a licence key.
+repo_icon: icon.png
+archive_older: 0
+make_current_version_link: false
+repo_keyalias: repokey
+keystore: keystore.p12
+keystorepass:
+  env: FDROID_KEYSTORE_PASS
+keypass:
+  env: FDROID_KEYSTORE_PASS
+keydname: CN=Enhanced Training Studio F-Droid repository
