@@ -236,6 +236,9 @@ try {
   Write-Host "`nBUILD OK -> $PSScriptRoot\$outApk ($Edition $version)"
 } catch {
   Write-Host "`nBUILD FAILED: $_" -ForegroundColor Red
+  $buildFailed = $true
 } finally {
   Stop-Transcript | Out-Null
 }
+# exit code for scripts that run this one (scripts\ship.ps1 in ets-web)
+if ($buildFailed) { exit 1 }

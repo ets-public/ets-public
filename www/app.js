@@ -30,8 +30,8 @@ const LAB_PRESETS = [
 const STORE_KEY = 'inj-data-v2';
 
 /* ================= State ================= */
-let db = { compounds:[], logs:[], labs:[], health:{days:{}}, exercises:[], templates:[], workouts:[], activeWorkout:null, settings:{} };
-const DEFAULT_SETTINGS = { reminders:false, morning:'08:00', night:'21:00', lowStockDoses:3, autoBackup:true, lastBackupAt:null, lastBackupFile:null, lastBackupError:null, lockEnabled:false, lockAfter:0, privateNotifs:true, secureScreen:false };
+let db = { compounds:[], logs:[], labs:[], checkins:[], programmes:[], measures:[], health:{days:{}}, exercises:[], templates:[], workouts:[], activeWorkout:null, settings:{} };
+const DEFAULT_SETTINGS = { reminders:false, morning:'08:00', night:'21:00', lowStockDoses:3, leadDays:14, currency:'$', autoBackup:true, lastBackupAt:null, lastBackupFile:null, lastBackupError:null, lockEnabled:false, lockAfter:0, privateNotifs:true, secureScreen:false };
 const ui = {
   tab:'today', mode:'inj', lastTab:{inj:'today', train:'workout', health:'hoverview'}, hMetric:null, hRange:30, histFilter:'all', calMonth:null, calSel:null, draft:null, tplEdit:null,
   chartCompound:null, chartWeeks:4
@@ -53,6 +53,8 @@ const _fT = new Intl.DateTimeFormat(undefined,{hour:'numeric', minute:'2-digit'}
 const _fM = new Intl.DateTimeFormat(undefined,{month:'long', year:'numeric'});
 const fmtDate = d => _fD.format(new Date(d));
 const fmtShort = d => _fS.format(new Date(d));
+/* short date, with the year when it isn't this year */
+const fmtShortY = d => { const x = new Date(d); return fmtShort(x) + (x.getFullYear() !== new Date().getFullYear() ? ` ${x.getFullYear()}` : ''); };
 const fmtTime = d => _fT.format(new Date(d));
 const fmtMonth = d => _fM.format(new Date(d));
 const round = (n,p=2) => Math.round(n*10**p)/10**p;
@@ -82,7 +84,7 @@ function drawText(volMl, c){
    markup into number fields, break ids, pollute prototypes or crash the app with nulls. */
 const NUM_KEYS = new Set(['strength','dosePerInj','dose','volumeMl','powderMg','waterMl','halfLife','every','sizeMl','remainingMl',
   'w','r','tr','reps','restSec','distanceM','elapsedSec','movingSec','elevGainM','avg','max','min','lowStockDoses','lockAfter','inc',
-  'durMin','heightCm','weightKg','bodyFat','activity','hrMax','kcal','steps','lat','lon','alt','acc','dosesLeft','seg','pausedMs']);
+  'durMin','heightCm','weightKg','bodyFat','price','leadDays','alertLow','alertHigh','everyWeeks','waist','chest','arm','thigh','hips','neck','calf','activity','hrMax','kcal','steps','lat','lon','alt','acc','dosesLeft','seg','pausedMs']);
 const ID_KEYS = new Set(['id','compoundId','exId','wid','templateId','chartCompound']);
 function cleanData(v, key, depth=0){
   if(depth > 14) return undefined;
@@ -111,7 +113,11 @@ function cleanCollections(d){
   const objs = a => Array.isArray(a) ? a.filter(isObj) : [];
   d.compounds = objs(d.compounds).filter(c=>c.id && typeof c.name==='string');
   d.logs = objs(d.logs).filter(l=>l.id && validDate(l.date));
-  d.labs = objs(d.labs).filter(l=>l.id);
+  d.labs = objs(d.labs).filter(l=>l.id && typeof l.marker==='string' && l.marker.trim() && typeof l.date==='string' && /^\d{4}-\d{2}-\d{2}$/.test(l.date) && !isNaN(Date.parse(l.date)) && isFinite(+l.value) && l.value!==null && l.value!=='')
+    .map(l=>{ const o = {...l, marker: l.marker.slice(0, 80), value: +l.value};
+      ['unit','qual','refText','notes','flag'].forEach(k=>{ if(o[k]!=null && typeof o[k]!=='string') o[k] = String(o[k]); });
+      if(o.time!=null && !(typeof o.time==='string' && /^\d{1,2}:\d{2}$/.test(o.time))) delete o.time;
+      return o; });
   d.exercises = objs(d.exercises).filter(e=>e.id && typeof e.name==='string');
   d.templates = objs(d.templates).filter(t=>t.id).map(t=>({...t, name: String(t.name||'Template'), items: objs(t.items).filter(i=>i.exId).map(i=>({...i, sets: Math.min(20, Math.max(1, Math.round(+i.sets) || 3))}))}));
   d.workouts = objs(d.workouts).filter(w=>w.id && validDate(w.start)).map(w=>({...w, items: objs(w.items).map(it=>({...it, sets: objs(it.sets)}))}));
@@ -120,6 +126,9 @@ function cleanCollections(d){
   if(d.activeWorkout) d.activeWorkout.items = objs(d.activeWorkout.items).map(it=>({...it, sets: objs(it.sets)}));
   if(d.activeActivity && !(isObj(d.activeActivity) && ACT_KINDS.includes(d.activeActivity.kind) && validDate(d.activeActivity.start))) d.activeActivity = null;
   if(!isObj(d.health) || !isObj(d.health.days)) d.health = {days:{}};
+  d.checkins = normaliseCheckins(d.checkins);
+  d.programmes = normaliseProgrammes(d.programmes);
+  d.measures = normaliseMeasures(d.measures);
   if(!isObj(d.settings)) d.settings = {};
   return d;
 }
@@ -159,6 +168,9 @@ async function load(){
   db.compounds = Array.isArray(data.compounds) ? data.compounds : [];
   db.logs = Array.isArray(data.logs) ? data.logs : [];
   db.labs = Array.isArray(data.labs) ? data.labs : [];
+  db.checkins = data.checkins || [];
+  db.programmes = data.programmes || [];
+  db.measures = data.measures || [];
   db.health = data.health && typeof data.health.days==='object' ? data.health : {days:{}};
   db.exercises = Array.isArray(data.exercises) ? data.exercises : [];
   db.templates = Array.isArray(data.templates) ? data.templates : [];
@@ -204,8 +216,11 @@ function migrate(){
     if(c.halfLife!==undefined && !(c.halfLife>0)) c.halfLife = null;
     if(!Array.isArray(c.pauses)) c.pauses = [];
     if(!Array.isArray(c.doseHistory)) c.doseHistory = c.dosePerInj>0 ? [{from: ymd(c.createdAt), dose: c.dosePerInj}] : [];
+    normaliseCompound(c);
   });
   db.logs.forEach(l=>{
+    if(l.unit!=null) l.unit = l.unit==='mcg' ? 'mcg' : 'mg';
+    if(l.compoundName!=null) l.compoundName = String(l.compoundName).slice(0, 80);
     const c = db.compounds.find(c=>c.id===l.compoundId);
     if(c){
       if(!l.compoundName) l.compoundName = c.name;
@@ -237,6 +252,55 @@ function inCycle(c, d){
   const w = activeWindows(c); if(!w.length) return true;
   const k = ymd(d); return w.some(p=>(!p.start || k>=p.start) && (!p.end || k<p.end));
 }
+/* Every field a screen relies on gets a safe shape: enums to known values, dates to YYYY-MM-DD, counts to integers.
+   (Backups can be edited by hand or crafted; anything odd is dropped rather than shown.) */
+const okYmd = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(parseYmd(v));
+function normaliseCompound(c){
+  c.name = String(c.name).slice(0, 80);
+  const s = c.schedule;
+  if(!isObj(s)) c.schedule = {type:'weekly', days:[]};
+  else if(s.type==='interval') c.schedule = {type:'interval', every: Math.min(365, Math.max(1, +s.every || 7)), start: okYmd(s.start) ? s.start : null};
+  else c.schedule = {type:'weekly', days: [...new Set((Array.isArray(s.days) ? s.days : []).map(Number))].filter(d=>Number.isInteger(d) && d>=0 && d<=6).sort()};
+  if(c.cycle){
+    const cy = c.cycle, days = Math.round(+cy.days);
+    c.cycle = isObj(cy) && okYmd(cy.start) && days>=1 && days<=730 ? {start:cy.start, days, unit: cy.unit==='days' ? 'days' : 'weeks'} : null;
+    if(!c.cycle) delete c.cycle;
+  }
+  c.periods = (Array.isArray(c.periods) ? c.periods : []).filter(isObj).map(p=>({start: okYmd(p.start) ? p.start : null, end: okYmd(p.end) ? p.end : null, ...(okYmd(p.anchor) ? {anchor:p.anchor} : {})}));
+  if(c.ongoingFrom!=null && !okYmd(c.ongoingFrom)) c.ongoingFrom = null;
+  c.pauses = c.pauses.filter(p=>isObj(p) && okYmd(p.from)).map(p=>({...p, from:p.from, to: okYmd(p.to) ? p.to : null}));
+  c.doseHistory = c.doseHistory.filter(e=>isObj(e) && okYmd(e.from) && +e.dose>0).map(e=>({from:e.from, dose:+e.dose}));
+  if(c.stock!=null){
+    // sealed vials: {id, count, sizeMl, strength} for oil, {id, count, powderMg} for powder
+    const pos = (v, max) => { v = +v; return v>0 && v<=max ? v : null; };
+    c.stock = (Array.isArray(c.stock) ? c.stock : []).filter(isObj).map(x=>({
+      id: typeof x.id==='string' && /^[\w-]{1,40}$/.test(x.id) ? x.id : uid(),
+      count: Math.min(999, Math.max(0, Math.round(+x.count) || 0)),
+      sizeMl: pos(x.sizeMl, 1000), strength: pos(x.strength, 100000), powderMg: pos(x.powderMg, 1000000),
+      price: pos(x.price, 1000000), expiry: okYmd(x.expiry) ? x.expiry : null, batch: typeof x.batch==='string' ? x.batch.trim().slice(0, 40) : ''
+    })).filter(x=>x.powderMg || (x.sizeMl && x.strength)).slice(0, 20);
+    if(!c.stock.length) delete c.stock;
+  }
+  if(isObj(c.vial)){
+    const v = c.vial;
+    if(v.price!=null && !(+v.price>0 && +v.price<=1000000)) delete v.price;
+    if(v.expiry!=null && !okYmd(v.expiry)) delete v.expiry;
+    if(v.batch!=null) v.batch = String(v.batch).trim().slice(0, 40);
+  } else if(c.vial!=null) c.vial = null;
+  if(c.orderedAt!=null && !okYmd(c.orderedAt)) delete c.orderedAt;
+}
+/* The vial as entered in the compound sheet. Its "opened" time is the baseline for stock: logs before it don't touch
+   the amount left. Saving without changing the vial keeps that time; entering a new amount starts it now. */
+function vialFromSheet(ex, sizeMl, remain){
+  const remainingMl = remain>=0 && isFinite(remain) ? Math.min(remain, sizeMl) : sizeMl;
+  const old = ex && ex.vial;
+  const same = old && Math.abs((+old.sizeMl||0) - sizeMl) < 1e-9 && Math.abs(round(+old.remainingMl||0, 3) - round(remainingMl, 3)) < 1e-6;
+  if(same) return {...old};                                          // untouched: keep it exactly (with or without an opened time)
+  const v = {sizeMl, remainingMl, openedAt: new Date().toISOString()};
+  // the same vial with its amount corrected keeps its price, expiry and batch
+  if(old && Math.abs((+old.sizeMl||0) - sizeMl) < 1e-9) ['price','expiry','batch'].forEach(k=>{ if(old[k]!=null && old[k]!=='') v[k] = old[k]; });
+  return v;
+}
 /* where the current cycle is today: {state:'before'|'active'|'done', week, weeks, day, days, start, end, lastDay} */
 function cycleState(c, now=new Date()){
   if(!c.cycle) return null;
@@ -246,13 +310,13 @@ function cycleState(c, now=new Date()){
     day: day+1, days: c.cycle.days, week: Math.floor(day/7)+1, weeks: Math.ceil(c.cycle.days/7), unit: c.cycle.unit || 'weeks' };
 }
 function cycleDoses(c, cy){ const o = occurrences(c, parseYmd(cy.start), addDays(parseYmd(cycleEndOf(cy)), -1)); return o; }
-function cycleLengthText(cy){ return cy.unit==='days' || cy.days%7 ? `${cy.days} ${cy.days===1?'day':'days'}` : `${cy.days/7} ${cy.days===7?'week':'weeks'}`; }
+function cycleLengthText(cy){ const n = Math.round(+cy.days) || 0; return cy.unit==='days' || n%7 ? `${n} ${n===1?'day':'days'}` : `${n/7} ${n===7?'week':'weeks'}`; }
 function cycleNote(c){
   const cy = cycleState(c); if(!cy) return '';
   if(cy.state==='before') return ` · Cycle starts ${esc(fmtShort(parseYmd(cy.start)))}`;
   if(cy.state==='done') return ` · Cycle ended ${esc(fmtShort(parseYmd(cy.lastDay)))}`;
   const left = diffDays(parseYmd(cy.lastDay), new Date());     // days until the cycle's last day
-  return ` · ${cy.unit==='days' || cy.days%7 ? `Day ${cy.day} of ${cy.days}` : `Week ${cy.week} of ${cy.weeks}`}${left<=7 ? ` · ${left<=0 ? 'last day' : left===1 ? 'ends tomorrow' : `ends in ${left}d`}` : ''}`;
+  return ` · ${cy.unit==='days' || cy.days%7 ? `Day ${esc(cy.day)} of ${esc(cy.days)}` : `Week ${esc(cy.week)} of ${esc(cy.weeks)}`}${left<=7 ? ` · ${left<=0 ? 'last day' : left===1 ? 'ends tomorrow' : `ends in ${left}d`}` : ''}`;
 }
 /* Dose history: [{from:'YYYY-MM-DD', dose:mg}] — the planned dose per injection from that date on. */
 function doseOn(c, d){
@@ -331,7 +395,9 @@ function timelineCalc(c, from, to){
   const used = new Set();
   const res = [];
   occ.forEach((d,i)=>{
-    const next = occ[i+1] || addDays(d, 60);
+    // the last dose in the range still ends where the next real dose begins (not 60 days later), so a missed dose
+    // isn't matched to a much later log just because the range stops here
+    const next = occ[i+1] || nextOccurrence(c, d) || addDays(d, 60);
     const winStart = addDays(d,-1);
     let match = null;
     for(const x of logs){
@@ -407,17 +473,108 @@ function stockInfo(c){
   const pv = plannedVol(c);
   const dosesLeft = pv ? Math.floor(rem/pv + 1e-9) : null;
   const pct = Math.min(1, rem / c.vial.sizeMl);
-  const low = (dosesLeft!==null && dosesLeft <= (db.settings.lowStockDoses||3)) || pct < 0.1;
+  const low = (dosesLeft!==null && dosesLeft <= (db.settings.lowStockDoses ?? 3)) || pct < 0.1;
   return {rem, pct, dosesLeft, low};
 }
 /* when: the dose's date. Doses from before the current vial was opened belong to an earlier vial and don't change it. */
 function adjustStock(compoundId, deltaMl, when){
   const c = db.compounds.find(c=>c.id===compoundId);
   if(!c || !c.vial || !(c.vial.sizeMl>0) || !isFinite(deltaMl)) return;
-  if(when && c.vial.openedAt && new Date(when) < new Date(c.vial.openedAt)) return;
+  // compared to the minute: log times from the time picker have no seconds, so a dose logged straight after
+  // "Start new vial" must still come off the new vial
+  if(when && c.vial.openedAt && +new Date(when) < Math.floor(+new Date(c.vial.openedAt)/60000)*60000) return;
   const rem = (c.vial.remainingMl ?? c.vial.sizeMl) + deltaMl;
   c.vial.remainingMl = Math.max(0, Math.min(c.vial.sizeMl, round(rem, 3)));
 }
+/* ---------- Stock: the open vial plus sealed vials on hand (c.stock) ---------- */
+const stockLines = c => Array.isArray(c.stock) ? c.stock : [];
+const stockTracked = c => stockLines(c).length > 0;
+const sealedCount = c => stockLines(c).reduce((n,x)=>n + x.count, 0);
+const isPowder = c => c.form==='powder';
+function sealedMg(c, x){ return isPowder(c) ? (+x.powderMg || 0) : (+x.sizeMl || 0) * (+x.strength || 0); }
+function lineLabel(c, x){ return isPowder(c) ? `${round(x.powderMg,3)} mg powder` : `${round(x.sizeMl,2)} mL · ${round(x.strength,3)} mg/mL`; }
+function strengthLabel(c){ return isPowder(c) ? `Powder, mixed to ${round(c.strength,3)} mg/mL` : `${round(c.strength,3)} mg/mL`; }
+/* totals: whole numbers with thousands separators once they're big enough */
+function fmtStock(mg, unit){ const v = unit==='mcg' ? mg*1000 : mg; const r = v>=10 ? Math.round(v) : round(v,1); return `${r.toLocaleString('en-AU')} ${unit==='mcg'?'mcg':'mg'}`; }
+/* expired vials don't count toward how long stock lasts, when to reorder or what it's worth */
+const notExpired = k => !k || k >= ymd(new Date());
+function onHand(c){
+  const st = stockInfo(c);
+  const openMg = st && notExpired(c.vial.expiry) ? st.rem * (+c.strength || 0) : 0;
+  const good = stockLines(c).filter(x=>notExpired(x.expiry));
+  const sealed = good.reduce((n,x)=>n + x.count * sealedMg(c, x), 0);
+  return {openMg, sealedMg: sealed, totalMg: openMg + sealed, sealed: good.reduce((n,x)=>n + x.count, 0), expired: sealedCount(c) - good.reduce((n,x)=>n + x.count, 0)};
+}
+/* How far the stock on hand goes at the planned doses (dose changes, pauses and cycles included):
+   {doses, last: date of the last dose it covers, short: date of the first dose it doesn't (null = covers all planned doses), spareMg} */
+function stockRunway(c, total = onHand(c).totalMg){
+  const today = dayStart(new Date());
+  const takenToday = db.logs.some(l=>l.compoundId===c.id && ymd(new Date(l.date))===ymd(today));
+  const occ = occurrences(c, takenToday ? addDays(today, 1) : today, addDays(today, 730));
+  if(!occ.length) return null;
+  let left = total, n = 0, last = null;
+  for(const d of occ){
+    const dose = doseOn(c, d); if(!(dose>0)) continue;
+    if(left + 1e-6 < dose) return {doses:n, last, short:d, spareMg:left};
+    left -= dose; n++; last = d;
+  }
+  return n ? {doses:n, last, short:null, spareMg:left, horizon: occ[occ.length-1]} : null;
+}
+function runwayText(c, r){
+  if(!r) return '';
+  if(!r.doses) return 'not enough for the next dose';
+  if(r.short){
+    const days = diffDays(r.last, new Date());
+    const when = fmtShortY(r.last);
+    const span = days >= 140 ? ` · about ${Math.round(days/30.44)} months` : days >= 14 ? ` · ${Math.floor(days/7)} weeks` : '';
+    return `until ${when} · ${r.doses} ${r.doses===1?'dose':'doses'}${span}`;
+  }
+  const cy = cycleState(c);
+  return cy && cy.state!=='done' ? `the rest of the cycle${r.spareMg>0.5 ? ` · ${fmtStock(r.spareMg, c.unit)} spare` : ''}` : '2 years or more';
+}
+/* money, in the currency symbol from Setup */
+function fmtMoney(n){
+  const cur = String(db.settings.currency || '$').slice(0, 4);
+  const v = n >= 100 ? Math.round(n).toLocaleString('en-AU') : n.toFixed(2);
+  return esc(`${cur}${v}`);
+}
+/* cost per mg: the open vial's price if it has one, otherwise the sealed vials' average */
+function costPerMg(c){
+  const v = c.vial;
+  if(v && v.price>0 && v.sizeMl>0){ const mg = isPowder(c) ? (+c.powderMg || 0) : v.sizeMl * (+c.strength || 0); if(mg>0) return v.price / mg; }
+  let money = 0, mg = 0;
+  stockLines(c).forEach(x=>{ if(x.price>0){ const m = sealedMg(c, x); if(m>0){ money += x.price * Math.max(1, x.count); mg += m * Math.max(1, x.count); } } });
+  return mg>0 ? money / mg : null;
+}
+/* planned mg per week, from the next four weeks of the schedule (dose changes, pauses and cycles included) */
+function weeklyMg(c){
+  const today = dayStart(new Date());
+  const occ = occurrences(c, today, addDays(today, 27));
+  return occ.reduce((t,d)=>t + (doseOn(c, d) || 0), 0) / 4;
+}
+function costInfo(c){
+  const ppm = costPerMg(c); if(ppm==null) return null;
+  const week = weeklyMg(c) * ppm, oh = onHand(c);
+  return {week, month: week * 52 / 12, value: oh.totalMg * ppm};
+}
+/* reorder: order by the day that leaves the delivery time before the stock runs out */
+const leadDays = () => Math.min(120, Math.max(0, Math.round(+db.settings.leadDays) || 0));
+function reorderInfo(c){
+  if(!(c.vial || stockTracked(c)) || !hasSchedule(c)) return null;
+  const r = stockRunway(c); if(!r || !r.short) return null;
+  const by = dayStart(addDays(r.short, -leadDays()));
+  const today = dayStart(new Date());
+  const ordered = c.orderedAt && diffDays(today, parseYmd(c.orderedAt)) <= leadDays() + 14 ? c.orderedAt : null;
+  return {by, due: by <= today, ordered, runway: r};
+}
+/* sealed vials (or the open one) expiring within 30 days */
+function expiringSoon(c){
+  const soon = ymd(addDays(new Date(), 30)), out = [];
+  stockLines(c).forEach(x=>{ if(x.count>0 && x.expiry && x.expiry <= soon) out.push({line:x, expiry:x.expiry, count:x.count, batch:x.batch}); });
+  if(c.vial && c.vial.expiry && c.vial.expiry <= soon && (c.vial.remainingMl ?? c.vial.sizeMl) > 0) out.push({open:true, expiry:c.vial.expiry, count:1, batch:c.vial.batch || ''});
+  return out.sort((a,b)=>a.expiry<b.expiry?-1:1);
+}
+const expText = k => { const d = diffDays(parseYmd(k), dayStart(new Date())); return d < 0 ? `expired ${fmtShort(parseYmd(k))}` : d === 0 ? 'expires today' : `expires ${fmtShort(parseYmd(k))}`; };
 function siteHistory(route){
   const last = {};
   SITES[route].forEach(s=>last[s]=null);
@@ -446,7 +603,7 @@ function suggestSite(route, c){
    In the premium edition those sections also need an active licence. */
 const REST_NOTIF_ID = 1900000001;
 const WEEKLY_NOTIF_ID = 1900000301;
-const INJ_TABS = [['today','Today'],['calendar','Calendar'],['history','History'],['labs','Labs'],['setup','Setup']];
+const INJ_TABS = [['today','Today'],['calendar','Calendar'],['history','History'],['stock','Stock'],['labs','Labs'],['setup','Setup']];
 
 
 const EDITION = 'free';
@@ -457,14 +614,14 @@ function tabsFor(m){
   if(m==='health') return [['hpromo','Health']];
   return INJ_TABS;
 }
-const FIRST_TAB = { inj:'today', get train(){ return premiumOn() ? 'workout' : 'tpromo'; }, get health(){ return premiumOn() ? 'hoverview' : 'hpromo'; } };
+const FIRST_TAB = { inj:'today', get train(){ return premiumOn() ? 'workout' : 'tpromo'; }, get health(){ return premiumOn() ? (webApp() ? 'hweek' : 'hoverview') : 'hpromo'; } };
 const PROMO = {
   labs: {title:'Blood tests', lead:'Keep every blood test next to your protocol.', points:['Import the PDF report from your pathology lab, or add results by hand','See each marker over time, with anything outside the lab range flagged','Blood tests shown on your estimated levels chart, with the time since your last dose','Blood tests in the doctor report']},
   train: {title:'Training', lead:'Log your lifting and cardio in the same app as your protocol.', points:['Workouts from your own templates, with a rest timer that works with the phone locked','Personal bests, estimated one-rep max and progression suggestions','GPS runs, walks and hikes with maps, splits and elevation, plus treadmill runs','Import your history from the Strong app']},
   health: {title:'Health', lead:'Your watch data, recovery and body numbers alongside everything else.', points:['Sleep, resting heart rate, HRV, steps and more from Health Connect','A daily readiness score and a weekly report','Live heart rate from a Bluetooth band during workouts','BMI, calories and macro targets from your profile']},
 };
 function renderPromo(kind){
-  const p = PROMO[kind];
+  const p = kind==='health' && webApp() ? {title:'Health', lead:'Your week and your body numbers alongside everything else.', points:['A weekly report: doses taken and missed, training volume and records','Body profile: BMI, calorie and protein targets for your goal','Watch data (sleep, heart rate, readiness) is in the Android app'] } : PROMO[kind];
   return `<div class="card promo"><div class="alert-code">${premiumOn() ? '' : 'WITH A LICENCE'}</div>
     <h3 style="margin:6px 0 6px">${esc(p.title)}</h3><p class="small" style="margin:0 0 10px">${esc(p.lead)}</p>
     <ul class="promo-list">${p.points.map(t=>`<li>${esc(t)}</li>`).join('')}</ul>${premiumCta()}</div>
@@ -482,6 +639,7 @@ let wkSaveT = null;
 let reloading = false;
 function flushPending(){
   if(reloading) return;
+  if(saveTimer){ clearTimeout(saveTimer); saveTimer = null; persistQuiet(); scheduleReminders(); }
   if(wkSaveT){ clearTimeout(wkSaveT); wkSaveT = null; persistQuiet(); }
   if(modeSaveT){ clearTimeout(modeSaveT); modeSaveT = null; persistQuiet(); }
 }
@@ -508,6 +666,10 @@ function notifCardHtml(){
     </div>
     <div class="switch-row" style="border-top:1px solid var(--hair)"><div><div class="list-title">Private reminders</div><div class="list-sub">Say "Reminder" without compound names or doses</div></div>
       <label class="switch"><input type="checkbox" id="setPrivNotif" ${s.privateNotifs?'checked':''} aria-label="Private reminders"><span></span></label></div>
+    <div class="switch-row" style="border-top:1px solid var(--hair)"><div><div class="list-title">Stock and planning</div><div class="list-sub">When to reorder, vials about to expire${''}</div></div>
+      <label class="switch"><input type="checkbox" id="setPlanNotif" ${s.planNotifs!==false?'checked':''} aria-label="Stock and planning reminders"><span></span></label></div>
+    <div class="switch-row" style="border-top:1px solid var(--hair)"><div><div class="list-title">Check-in reminder</div><div class="list-sub">At your night time, on days you haven't checked in</div></div>
+      <label class="switch"><input type="checkbox" id="setCiRem" ${s.checkinRemind?'checked':''} aria-label="Check-in reminder"><span></span></label></div>
 
     ${isNative?`<button class="btn btn-outline btn-block" data-action="rem-test" style="margin-top:8px">Send a test notification</button>`:''}
   </div>`;
@@ -518,6 +680,7 @@ const TAB_META = {
   today:   {title:'Today'},
   calendar:{title:'Calendar'},
   history: {title:'History'},
+  stock:   {title:'Stock'},
   labs:    {title:'Labs'},
   setup:   {title:'Setup'},
   workout: {title:'Workout'},
@@ -541,6 +704,7 @@ function renderTabbar(){
     bar.innerHTML = tabs.map(([k,l])=>`<button class="tab-btn" data-tab="${esc(k)}"><span>${l}</span></button>`).join('');
     bar.dataset.sig = sig;
     bar.style.gridTemplateColumns = `repeat(${tabs.length}, minmax(0,1fr))`;
+    bar.classList.toggle('many', tabs.length > 5);
   }
   document.querySelectorAll('.tab-btn').forEach(b=>{
     const on = b.dataset.tab===ui.tab || (ui.tab==='app' && b.dataset.tab==='setup');
@@ -590,6 +754,12 @@ function render(){
     sub.textContent = 'Injection log'; meta.textContent = `${String(db.logs.length).padStart(3,'0')} entries`;
     html = renderHistory();
     if(db.compounds.length){ top.hidden=false; top.dataset.action='log'; top.innerHTML = PLUS + '<span>Log</span>'; top.setAttribute('aria-label','Log injection'); }
+  } else if(ui.tab==='stock'){
+    sub.textContent = 'Vials on hand';
+    const n = db.compounds.reduce((t,c)=>t + sealedCount(c), 0);
+    meta.textContent = n ? `${n} sealed` : '';
+    html = renderStock();
+    if(db.compounds.length){ top.hidden=false; top.dataset.action='stock-add'; top.innerHTML = PLUS + '<span>Add</span>'; top.setAttribute('aria-label','Add vials to stock'); }
   } else if(ui.tab==='app'){
     sub.textContent = 'Notifications · lock · backup';
     html = renderAppSettings();
@@ -598,10 +768,13 @@ function render(){
     html = (renderSetup()) + appSettingsLink();
   }
   
+  html = webUpdateBannerHtml() + html;
   $('#main').innerHTML = html;
+  markTapRows($('#main'));
   
   fitTabLabels();
   if(ui.tab==='today') drawLevels();
+  
 }
 
 /* Tab labels shrink together until the longest fits its cell (large system text sizes). */
@@ -656,11 +829,12 @@ function syringeSvg(c, volMl, alert){
     ${ticks}${labels}</svg>`;
 }
 function renderToday(){
+  const webTop = webInstallHtml();
   if(!db.compounds.length){
-    return `<div class="card"><div class="empty">No compounds yet.<br><br>
+    return webTop + `<div class="card"><div class="empty">No compounds yet.<br><br>
       <button class="btn" data-action="compound-add">Add a compound</button></div></div>`;
   }
-  let html = '';
+  let html = webTop + calNudgeHtml();
   const bAge = db.settings.lastBackupAt ? diffDays(new Date(), db.settings.lastBackupAt) : null;
   if(db.logs.length && (bAge===null || bAge >= 7 || (isNative && db.settings.lastBackupError))){
     const why = isNative && db.settings.lastBackupError ? 'The automatic backup could not be saved.' : bAge===null ? 'Your data has never been backed up.' : `Last backup was ${bAge} days ago.`;
@@ -670,11 +844,30 @@ function renderToday(){
   db.compounds.forEach(c=>{
     const s = stockInfo(c);
     if(s && s.low){
-      html += `<div class="alert"><span class="alert-code">VIAL LOW · ${esc(c.name.toUpperCase())}</span>
-        <div>${round(s.rem,2)} mL left${s.dosesLeft!==null?`, about <b>${s.dosesLeft} ${s.dosesLeft===1?'dose':'doses'}</b>`:''}.</div>
-        <button class="btn btn-outline" data-action="vial-new" data-id="${esc(c.id)}">Start new vial</button></div>`;
+      const tracked = stockTracked(c), n = sealedCount(c), last = tracked && !n;
+      html += `<div class="alert"><span class="alert-code">${last ? 'LAST VIAL' : 'VIAL LOW'} · ${esc(c.name.toUpperCase())}</span>
+        <div>${round(s.rem,2)} mL left${s.dosesLeft!==null?`, about <b>${s.dosesLeft} ${s.dosesLeft===1?'dose':'doses'}</b>`:''}.${tracked ? (n ? ` ${n} sealed ${n===1?'vial':'vials'} in Stock.` : ' <b>No sealed vials left</b> in Stock.') : ''}</div>
+        <div class="foot-btns">${last ? `<button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add vials</button>` : ''}<button class="btn btn-outline" data-action="vial-new" data-id="${esc(c.id)}">${last ? 'New vial' : 'Start new vial'}</button></div></div>`;
     }
   });
+  db.compounds.forEach(c=>{
+    const ro = reorderInfo(c);
+    if(ro && ro.due && !ro.ordered){
+      const r = ro.runway;
+      html += `<div class="alert"><span class="alert-code">REORDER · ${esc(c.name.toUpperCase())}</span>
+        <div>${r.doses ? `Your stock lasts until <b>${esc(fmtShortY(r.last))}</b> (${r.doses} ${r.doses===1?'dose':'doses'}).` : '<b>Not enough stock</b> for the next dose.'} Delivery takes about ${leadDays()} days.</div>
+        <div class="foot-btns"><button class="btn btn-outline" data-action="stock-ordered" data-id="${esc(c.id)}">I’ve ordered</button><button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add vials</button></div></div>`;
+    }
+    const ex = expiringSoon(c);
+    if(ex.length){
+      const e = ex[0], more = ex.length - 1;
+      html += `<div class="alert"><span class="alert-code">${diffDays(parseYmd(e.expiry), dayStart(new Date()))<0 ? 'EXPIRED' : 'EXPIRES SOON'} · ${esc(c.name.toUpperCase())}</span>
+        <div>${e.open ? 'Your open vial' : `${e.count} sealed ${e.count===1?'vial':'vials'}`}${e.batch ? ` (batch ${esc(e.batch)})` : ''} ${esc(expText(e.expiry))}${more ? `, and ${more} more ${more===1?'batch':'batches'} soon after` : ''}.</div>
+        <div class="foot-btns"><button class="btn btn-outline" data-action="go-stock">Open Stock</button></div></div>`;
+    }
+  });
+  
+  html += checkinCardHtml();
   const withStatus = db.compounds.map(c=>({c, st:statusFor(c)}));
   const due = withStatus.filter(x=>x.st.due), rest = withStatus.filter(x=>!x.st.due && !x.st.finished), done = withStatus.filter(x=>x.st.finished);
   const full = ({c, st})=>{
@@ -695,7 +888,7 @@ function renderToday(){
         <div><span>Site</span><span>${esc(site)}</span></div>
       </div>
       <div class="dose-foot">
-        <span class="vial-line ${stock&&stock.low?'low':''}">${stock ? `Vial ${round(stock.rem,2)} / ${c.vial.sizeMl} mL${stock.dosesLeft!==null?` · ≈${stock.dosesLeft} doses`:''}` : (pv ? `${round(pv,2)} mL${c.barrel?' · '+esc(c.barrel)+' syringe':''}` : '')}</span>
+        <span class="vial-line ${stock&&stock.low?'low':''}">${stock ? `Vial ${round(stock.rem,2)} / ${c.vial.sizeMl} mL${stock.dosesLeft!==null?` · ≈${stock.dosesLeft} doses`:''}${stockTracked(c)?` · +${sealedCount(c)} sealed`:''}` : (pv ? `${round(pv,2)} mL${c.barrel?' · '+esc(c.barrel)+' syringe':''}` : '')}</span>
         <div class="foot-btns"><button class="btn btn-outline" data-action="skip" data-id="${esc(c.id)}">Skip</button><button class="btn" data-action="log" data-id="${esc(c.id)}">Log dose</button></div>
       </div>
     </div>`;
@@ -707,7 +900,7 @@ function renderToday(){
         <div class="grow"><div class="dose-name">${esc(c.name)}</div>
           <div class="dose-sched">${c.dosePerInj?fmtAmt(c.dosePerInj,c.unit)+' · ':''}${pv&&pv<=1?round(pv*100,1)+' u · ':''}${esc(scheduleLabel(c))}${doseChangeNote(c)}${cycleNote(c)}</div>
           <div style="margin-top:8px"><span class="tag ${st.cls}">${esc(st.label)}</span></div></div>
-        <button class="btn btn-outline" data-action="log" data-id="${esc(c.id)}">Log</button>
+        <button class="btn btn-outline" data-action="log" data-id="${esc(c.id)}" aria-label="Log ${esc(c.name)}">Log</button>
       </div>
       ${pv && !st.paused ? `<div class="scale-slim">${syringeSvg(c, pv, false)}</div>` : ''}
     </div>`;
@@ -723,6 +916,8 @@ function renderToday(){
   html += `<div class="section-label">Estimated levels</div>`;
   if(!hl.length){
     html += `<div class="card"><div class="empty small">Add a compound's half-life to see roughly how much is active over time.${db.compounds.length ? `<br><br><button class="btn btn-outline" data-action="compound-edit" data-id="${esc(db.compounds[0].id)}">Add half-life to ${esc(db.compounds[0].name)}</button>` : ''}</div></div>`;
+    const fs = feelSvg();
+    if(fs) html += `<div class="section-label">How you've felt</div><div class="card">${fs}</div>`;
   } else {
     if(!hl.find(c=>c.id===ui.chartCompound)) ui.chartCompound = hl[0].id;
     const cur = hl.find(c=>c.id===ui.chartCompound);
@@ -731,6 +926,7 @@ function renderToday(){
         ${hl.length>1 ? `<div class="chips" style="margin:0">${hl.map(c=>`<button class="chip ${c.id===ui.chartCompound?'active':''}" data-action="chart-compound" data-id="${esc(c.id)}">${esc(c.name)}</button>`).join('')}</div>` : `<span class="dose-sched" style="margin:0">${esc(cur.name)} · t½ ${cur.halfLife} d</span>`}
         <div class="seg" role="group" aria-label="Range">${[[4,'4W'],[12,'12W'],[52,'1Y']].map(([w,l])=>`<button class="${ui.chartWeeks===w?'active':''}" data-action="chart-weeks" data-w="${esc(w)}">${l}</button>`).join('')}</div>
       </div>
+      ${feelChipsHtml()}
       <div class="chart-wrap" id="chartWrap"><canvas id="levels" role="img" aria-label="Estimated active amount over time"></canvas><div class="chart-tip" id="chartTip" hidden></div></div>
       <div class="chart-note" id="chartNote"></div>
     </div>`;
@@ -880,6 +1076,7 @@ function drawLevels(){
   const col = n => css.getPropertyValue(n).trim();
   const MONO = css.getPropertyValue('--mono') || 'monospace';
   chartState = paintLevels(cv, c, ui.chartWeeks, cv.clientWidth, cv.clientHeight, window.devicePixelRatio || 1, col, MONO);
+  chartState.feel = drawFeelOverlay(cv, chartState, col);
   const {marks, unit} = chartState;
   const doses = db.logs.filter(l=>l.compoundId===c.id && !l.skipped).length;
   let note = `Estimate from your ${doses} logged ${doses===1?'dose':'doses'} and a ${c.halfLife}-day half-life. Dashed line = planned doses. It shows amount remaining, not a blood level.`;
@@ -906,7 +1103,8 @@ function chartHover(ev){
   let best = null; for(const p of S.pts) if(p.v!=null && (!best || Math.abs(p.t-t) < Math.abs(best.t-t))) best = p;
   if(!best){ tip.hidden = true; return; }
   tip.hidden = false;
-  tip.innerHTML = `${fmtShort(best.t)}${best.t>S.now?' (planned)':''}<br><i style="background:var(--signal)"></i><b>${fmtEst(best.v, chartState.unit)}</b>`;
+  const ci = chartState.feel && chartState.feel.length ? checkinOn(ymd(new Date(best.t))) : null;
+  tip.innerHTML = `${fmtShort(best.t)}${best.t>S.now?' (planned)':''}<br><i style="background:var(--signal)"></i><b>${fmtEst(best.v, chartState.unit)}</b>${ci ? `<br>Felt: ${esc(checkinText(ci))}` : ''}`;
   tip.style.left = Math.min(Math.max(x(best.t), 60), W-60)+'px';
   tip.style.top = (y(best.v)-10)+'px';
 }
@@ -981,10 +1179,15 @@ function renderCalendar(){
       const canLog = it.c && it.day <= today;
       html += `<div class="list-item"><div class="list-main"><div class="list-title">${esc(name)}</div>
         <div class="list-sub">${esc(it.c?scheduleLabel(it.c):'')}</div></div>
-        ${pill}${canLog?` <button class="btn btn-tonal" data-action="log" data-id="${esc(it.c.id)}" data-day="${ymd(it.day)}">Log</button>`:''}${canLog && it.status!=='planned'?` <button class="btn btn-outline" data-action="skip" data-id="${esc(it.c.id)}" data-day="${ymd(it.day)}">Skip</button>`:''}</div>`;
+        ${pill}${canLog?` <button class="btn btn-tonal" data-action="log" data-id="${esc(it.c.id)}" data-day="${ymd(it.day)}" aria-label="Log ${esc(it.c.name)}">Log</button>`:''}${canLog && it.status!=='planned'?` <button class="btn btn-outline" data-action="skip" data-id="${esc(it.c.id)}" data-day="${ymd(it.day)}">Skip</button>`:''}</div>`;
     }
   });
   html += `</div>`;
+  if(sel <= today && db.settings.checkin !== false){
+    const ci = checkinOn(ui.calSel);
+    html += ci ? `<div class="card checkin-done tap-row" data-action="checkin-open" data-day="${esc(ui.calSel)}" aria-label="Edit this day's check-in"><span class="alert-code" style="color:var(--muted)">CHECK-IN</span><span class="small">${esc(checkinText(ci))}${ci.note ? ` · “${esc(ci.note)}”` : ''}</span></div>`
+      : `<button class="btn btn-outline btn-block" data-action="checkin-open" data-day="${esc(ui.calSel)}">Add a check-in for this day</button>`;
+  }
   return html;
 }
 
@@ -1038,9 +1241,21 @@ function labTestsCalc(){
   const pref = ['Total testosterone','Free testosterone','Oestradiol (E2)','Haematocrit'];
   return Object.entries(by).map(([k, rows])=>{
     const [d, tm] = k.split(' '); const at = parseYmd(d); const [h,m] = hm(tm); at.setHours(h,m,0,0);
+    if(!rows.some(r=>r.time)) at.approx = true;      // no time given: timing is only known to the day
     const key = pref.map(p=>rows.find(r=>r.marker===p)).find(Boolean) || rows.find(r=>r.flag) || rows[0];
     return {date:d, at, rows, key};
   }).sort((a,b)=>a.at-b.at);
+}
+/* Test time unknown: count whole days, and say "same day as" when a dose was logged that day (before or after is unknown). */
+function labTimingDays(at, onlyCompound){
+  const day = dayStart(at), end = +addDays(day, 1);
+  const list = (onlyCompound ? [onlyCompound] : db.compounds).map(c=>{
+    const a = (logsByCompound().get(c.id) || []).filter(e=>!e.l.skipped && e.t < end);
+    const last = a[a.length-1]; if(!last) return null;
+    const d = diffDays(day, dayStart(last.t));
+    return d <= 45 ? {c, d} : null;
+  }).filter(Boolean);
+  return list.map(({c, d})=>d===0 ? `same day as ${c.name}` : `${d} d after ${c.name}`).join(', ');
 }
 /* "2.1 d after Test Cyp" — time since the last logged dose before a blood test. */
 /* Logs grouped by compound, oldest first (rebuilt after every change) */
@@ -1053,6 +1268,7 @@ function logsByCompound(){
   return _logIdx = m;
 }
 function labTimingText(at, onlyCompound){
+  if(at && at.approx) return labTimingDays(at, onlyCompound);
   const lim = +at;
   const list = (onlyCompound ? [onlyCompound] : db.compounds).map(c=>{
     const a = logsByCompound().get(c.id) || [];
@@ -1065,7 +1281,7 @@ function labTimingText(at, onlyCompound){
   return list.map(({c, hrs})=>`${hrs < 48 ? Math.round(hrs)+' h' : round(hrs/24,1)+' d'} after ${c.name}`).join(', ');
 }
 function labGroups(){
-  const g = {};
+  const g = Object.create(null);     // marker names come from imports: no prototype to collide with
   db.labs.forEach(r=>{ (g[r.marker] = g[r.marker] || []).push(r); });
   Object.values(g).forEach(a=>a.sort((x,y)=>parseYmd(x.date)-parseYmd(y.date)));
   return g;
@@ -1096,9 +1312,18 @@ function renderSetup(){
   });
   html += `</div><button class="btn btn-block" data-action="compound-add">Add compound</button>`;
 
-  html += `<div class="section-label">Vial stock</div><div class="card">
-    <div class="field" style="margin:0"><label for="setLow">Warn when doses left in a vial is at or below</label>
+  html += `<div class="section-label">Stock</div><div class="card">
+    <div class="field" style="margin:0"><label for="setLow">Warn when doses left in the open vial is at or below</label>
     <input type="number" id="setLow" min="0" max="20" step="1" inputmode="numeric" value="${esc(s.lowStockDoses)}"></div>
+    <div class="row2" style="margin-top:12px">
+      <div class="field" style="margin:0"><label for="setLead">Delivery takes (days)</label><input type="number" id="setLead" min="0" max="120" step="1" inputmode="numeric" value="${esc(leadDays())}"></div>
+      <div class="field" style="margin:0"><label for="setCur">Currency symbol</label><input id="setCur" maxlength="4" autocomplete="off" value="${esc(s.currency || '$')}"></div>
+    </div>
+    <div class="hint" style="margin-top:6px">The Stock tab tells you when to reorder so new vials arrive before you run out.</div>
+  </div>`;
+  html += `<div class="section-label">Check-in</div><div class="card">
+    <div class="switch-row"><div><div class="list-title">Daily check-in</div><div class="list-sub">Rate energy, mood, libido and sleep, and note site reactions. Shown against your estimated levels and in the doctor report.</div></div>
+      <label class="switch"><input type="checkbox" id="setCheckin" ${s.checkin!==false?'checked':''} aria-label="Daily check-in"><span></span></label></div>
   </div>`;
 
   html += `<p class="small muted" style="text-align:center; margin:18px 8px 4px">Planning tool only. Doses, draw volumes and level estimates come from what you enter. Check them against your prescription.</p>`;
@@ -1113,17 +1338,164 @@ function appSettingsLink(){
 /* Version and edition come from build-info.js, which the build script writes. The free edition is an older version published on GitHub. */
 const BUILD = Object.assign({ version: 'dev', edition: 'premium', siteUrl: '' }, window.ETS_BUILD || {});
 function siteLink(path){ const u = String(BUILD.siteUrl||''); return /^https:\/\/[\w.-]+\.[a-z]{2,}$/i.test(u) && !/example\.com$/i.test(u) ? u + path : ''; }
+/* ================= Web app (iPhone and browsers) =================
+   The same app, installed from Safari to the Home Screen. Android-only parts (watch data, Bluetooth, GPS,
+   app lock, Google Drive, notifications, the APK updater) are hidden. Reminders go into the phone's Calendar
+   instead, and a service worker keeps the app working offline and updates it. */
+function webApp(){ return BUILD.platform === 'web'; }
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = () => { try{ return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; }catch(e){ return false; } };
+const web = { swWaiting:null, reloading:false };
+/* Save or share a file from the browser: the share sheet when there is one (iPhone: Save to Files, Mail…), otherwise a download. */
+async function webSaveFile(blob, name, title){
+  const file = new File([blob], name, {type: blob.type || 'application/octet-stream'});
+  try{
+    if(navigator.canShare && navigator.canShare({files:[file]})){ await navigator.share({files:[file], title: title || name}); return true; }
+  }catch(e){ if(e && e.name === 'AbortError') return false; }
+  const url = URL.createObjectURL(file), a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 60000);
+  return true;
+}
+/* ---- Reminders as Calendar events (the web can't schedule notifications without a server) ---- */
+const CAL_DAYS = 90;
+function calSig(){
+  const s = db.settings;
+  return JSON.stringify([s.morning, s.night, s.privateNotifs, db.compounds.map(c=>[c.id, c.name, c.unit, c.time, c.schedule, c.cycle, c.periods, c.ongoingFrom, c.archived, c.paused, c.dosePerInj, c.doseHistory]), s.labPlan || null, s.labPlan ? db.labs.length : 0]);
+}
+function calGroups(){
+  const now = new Date(), today = dayStart(now), until = addDays(today, CAL_DAYS), groups = {};
+  db.compounds.forEach(c=>{
+    if(!hasSchedule(c)) return;
+    timeline(c, today, until).forEach(t=>{
+      if(t.status==='taken' || t.status==='skipped') return;
+      const [h,m] = hm(c.time==='night' ? db.settings.night : db.settings.morning);
+      const at = new Date(t.day); at.setHours(h,m,0,0);
+      if(at <= now) return;
+      const key = `${ymd(t.day)}|${c.time==='night'?'night':'morning'}`;
+      const g = (groups[key] = groups[key] || {at, items:[]});
+      const dd = doseOn(c, t.day);
+      g.items.push(`${c.name}${dd?' '+fmtAmt(dd,c.unit):''}`);
+    });
+  });
+  return Object.entries(groups).sort((a,b)=>a[1].at-b[1].at);
+}
+function icsText(){
+  // RFC 5545 text: escape \ ; , and turn every kind of line break into \n (a raw CR/LF would start a new property)
+  const esc2 = s => String(s).replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\r\n|\r|\n/g,'\\n').replace(/[\x00-\x08\x0b-\x1f\x7f]/g,'');
+  const utc = d => d.toISOString().replace(/[-:]/g,'').replace(/\.\d{3}/,'');
+  const fold = l => { const out = []; let s = l; while(s.length > 73){ out.push(s.slice(0,73)); s = ' ' + s.slice(73); } out.push(s); return out.join('\r\n'); };
+  const priv = db.settings.privateNotifs, stamp = utc(new Date());
+  const lines = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Enhanced Training Studio//Reminders//EN','CALSCALE:GREGORIAN','METHOD:PUBLISH','X-WR-CALNAME:ETS reminders'];
+  const groups = calGroups();
+  groups.forEach(([key, g])=>{
+    const title = priv ? 'ETS reminder' : `ETS · ${g.items.length>1 ? `${g.items.length} injections due` : 'Injection due'}`;
+    const desc = priv ? 'Open the app to see what’s due.' : g.items.join(' · ') + '\nLog it in Enhanced Training Studio.';
+    lines.push('BEGIN:VEVENT', `UID:ets-${key.replace('|','-')}@enhancedtraining.app`, `DTSTAMP:${stamp}`, `DTSTART:${utc(g.at)}`, 'DURATION:PT15M',
+      `SUMMARY:${esc2(title)}`, `DESCRIPTION:${esc2(desc)}`, 'TRANSP:TRANSPARENT',
+      'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${esc2(title)}`, 'TRIGGER:PT0M', 'END:VALARM', 'END:VEVENT');
+  });
+  let extra = 0;
+  
+  lines.push('END:VCALENDAR');
+  return {text: lines.map(fold).join('\r\n') + '\r\n', count: groups.length + extra};
+}
+async function calExport(){
+  if(!db.compounds.some(hasSchedule)) return toast('Add a schedule to a compound first.');
+  const {text, count} = icsText();
+  if(!count) return toast('Nothing is due in the next 90 days.');
+  const blob = new Blob([text], {type:'text/calendar'});
+  if(isIOS()){
+    // Safari opens a calendar file with an "Add All" screen
+    const url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.target = '_blank'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 120000);
+  } else await webSaveFile(blob, 'ets-reminders.ics', 'ETS reminders');
+  db.settings.calUntil = ymd(addDays(new Date(), CAL_DAYS)); db.settings.calSig = calSig(); db.settings.calCount = count; save();
+  if(!sheetOpen) render();
+  toast(`${count} reminders ready: tap Add All`);
+}
+/* 'none' | 'ok' | 'stale' (schedule changed) | 'ending' (less than 2 weeks left) */
+function calState(){
+  const s = db.settings;
+  if(!s.calUntil) return 'none';
+  if(s.calSig !== calSig()) return 'stale';
+  if(diffDays(parseYmd(s.calUntil), new Date()) < 14) return 'ending';
+  return 'ok';
+}
+function calNudgeHtml(){
+  if(!webApp() || !db.compounds.some(hasSchedule) || webInstallHtml()) return '';   // one prompt at a time: install first
+  const st = calState(), s = db.settings;
+  if(st === 'ok' || (st === 'none' && s.calNudgeOff)) return '';
+  const msg = st === 'none' ? 'Get a reminder on each dose day: add your schedule to your phone’s Calendar.'
+    : st === 'stale' ? 'Your schedule changed since you added reminders to your Calendar. Add them again (delete the old “ETS” events first).'
+    : `Your Calendar reminders run out on ${fmtShort(parseYmd(s.calUntil))}. Add the next 90 days.`;
+  return `<div class="alert"><span class="alert-code">REMINDERS</span><div>${esc(msg)}</div>
+    <div class="btn-row"><button class="btn btn-outline" data-action="cal-export">Add to Calendar</button>${st==='none' ? `<button class="btn btn-outline" data-action="cal-nudge-off">Not now</button>` : ''}</div></div>`;
+}
+function calCardHtml(){
+  const s = db.settings, st = calState();
+  return `<div class="section-label">Reminders</div><div class="card" id="notifCard">
+    <p class="small" style="margin:0 0 10px">The web app can't send notifications by itself, so your dose days go into your phone's <b>Calendar</b>, with an alert at your morning or night time. The app sends nothing to a server, but if your calendar syncs to iCloud or Google the events go there too: keep <b>Private reminders</b> on to leave names and doses out.</p>
+    <div class="row2">
+      <div class="field"><label for="setMorning">Morning time</label><input type="time" id="setMorning" value="${esc(s.morning)}"></div>
+      <div class="field"><label for="setNight">Night time</label><input type="time" id="setNight" value="${esc(s.night)}"></div>
+    </div>
+    <div class="switch-row" style="border-top:1px solid var(--hair)"><div><div class="list-title">Private reminders</div><div class="list-sub">Say "ETS reminder" without compound names or doses</div></div>
+      <label class="switch"><input type="checkbox" id="setPrivNotif" ${s.privateNotifs?'checked':''} aria-label="Private reminders"><span></span></label></div>
+    ${s.calUntil ? `<div class="kv"><span>In your Calendar</span><span>${esc(String(s.calCount||0))} reminders, until ${esc(fmtDate(parseYmd(s.calUntil)))}</span></div>` : ''}
+    ${st==='stale' ? `<p class="small" style="margin:6px 0 0; color:var(--signal)">Your schedule or times changed. Delete the old “ETS” events in Calendar, then add them again.</p>` : ''}
+    <button class="btn btn-block" data-action="cal-export" style="margin-top:10px">${s.calUntil ? 'Add the next 90 days again' : 'Add reminders to Calendar'}</button>
+    <p class="small muted" style="margin:8px 0 0">${isIOS() ? 'Safari shows the events: tap <b>Add All</b>, and pick a calendar.' : 'Open the downloaded ets-reminders.ics file to add it to your calendar.'} The app reminds you when they need adding again.</p>
+  </div>`;
+}
+/* ---- Home Screen install, storage and updates ---- */
+function webInstallHtml(){
+  if(!webApp() || isStandalone() || db.settings.installHintOff) return '';
+  const how = isIOS() ? 'In Safari, tap the <b>Share</b> button, then <b>Add to Home Screen</b>.' : 'Use your browser’s menu: <b>Install app</b> or <b>Add to Home screen</b>.';
+  return `<div class="alert"><span class="alert-code">INSTALL</span><div>Add Enhanced Training Studio to your Home Screen. It opens full screen, works offline, and your data is safer from being cleared. ${how}</div>
+    <button class="btn btn-outline" data-action="install-hint-off">Got it</button></div>`;
+}
+function webAppCardHtml(){
+  if(!webApp()) return '';
+  return `<div class="section-label">Web app</div><div class="card">
+    <div class="kv" style="border:none; padding-top:0"><span>Installed on Home Screen</span><span>${isStandalone() ? 'Yes' : 'No'}</span></div>
+    <div class="kv"><span>Storage</span><span>${web.persisted ? 'Protected' : 'Standard'}</span></div>
+    <p class="small muted" style="margin:8px 0 0">Your data is kept only in this app on this phone, never on our servers. ${isStandalone() ? '' : 'Add it to your Home Screen so it isn’t cleared with Safari’s website data. '}Export a backup regularly, and keep it in Files or email it to yourself.</p>
+    ${web.swWaiting ? `<button class="btn btn-block" data-action="web-reload" style="margin-top:10px">New version ready: reload</button>` : ''}
+  </div>`;
+}
+function webUpdateBannerHtml(){
+  if(!webApp() || !web.swWaiting) return '';
+  return `<div class="upd-banner"><button type="button" data-action="web-reload"><span>New version ready</span><span>Reload ›</span></button></div>`;
+}
+async function webInit(){
+  if(!webApp()) return;
+  try{ if(navigator.storage && navigator.storage.persist){ web.persisted = await navigator.storage.persisted() || await navigator.storage.persist(); } }catch(e){}
+  if(!('serviceWorker' in navigator) || !(location.protocol === 'https:' || location.hostname === 'localhost')) return;
+  try{
+    const reg = await navigator.serviceWorker.register('sw.js');
+    const waiting = w => { if(w && navigator.serviceWorker.controller){ web.swWaiting = w; if(!sheetOpen && !editingNowAny()) render(); } };
+    waiting(reg.waiting);
+    reg.addEventListener('updatefound', ()=>{ const w = reg.installing; if(w) w.addEventListener('statechange', ()=>{ if(w.state === 'installed') waiting(w); }); });
+    navigator.serviceWorker.addEventListener('controllerchange', ()=>{ if(web.reloading) location.reload(); });
+    setInterval(()=>reg.update().catch(()=>{}), 6*3600e3);
+    document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) reg.update().catch(()=>{}); });
+  }catch(e){ console.warn('service worker', e); }
+}
+function webReload(){ if(!web.swWaiting) return location.reload(); web.reloading = true; flushPending(); web.swWaiting.postMessage('skipWaiting'); setTimeout(()=>location.reload(), 3000); }
+function editingNowAny(){ const a = document.activeElement; return !!(a && a.matches && a.matches('input, select, textarea')); }
 function aboutCardHtml(){
   const free = EDITION === 'free', link = siteLink('/pricing/');
   return `<div class="section-label">About</div><div class="card">
-    <div class="kv" style="border:none; padding-top:0"><span>Version</span><span>${esc(BUILD.version)}${free ? ' \u00b7 free edition' : ''}</span></div>
+    <div class="kv" style="border:none; padding-top:0"><span>Version</span><span>${esc(BUILD.version)}${free ? ' \u00b7 free edition' : webApp() ? ' \u00b7 web app' : ''}</span></div>
     ${free ? `<p class="small muted" style="margin:6px 0 0">The free edition covers injections, reminders, levels and backups. Training, blood tests and health come with a licence${link ? `: <a href="${esc(link)}" target="_blank" rel="noopener">${esc(link.replace(/^https:\/\//,''))}</a>` : ''}.</p>` : ''}
   </div>`;
 }
 function renderAppSettings(){
   const s = db.settings;
-  let html = `<button type="button" class="chip-btn" data-action="app-back" style="margin-bottom:4px">\u2039 Back to setup</button>` + notifCardHtml() + renderGoogleCard();
-  html += `<div class="section-label">Privacy</div><div class="card">
+  let html = `<button type="button" class="chip-btn" data-action="app-back" style="margin-bottom:4px">\u2039 Back to setup</button>` + (webApp() ? calCardHtml() + webAppCardHtml() : notifCardHtml() + renderGoogleCard());
+  if(!webApp()) html += `<div class="section-label">Privacy</div><div class="card">
     <div class="switch-row"><div><div class="list-title">App lock</div><div class="list-sub">${isNative && lockPlugin() ? 'Unlock with your fingerprint, face or screen lock' : 'Available in the Android app'}</div></div>
       <label class="switch"><input type="checkbox" id="setLock" ${s.lockEnabled?'checked':''} ${isNative && lockPlugin()?'':'disabled'} aria-label="App lock"><span></span></label></div>
     ${s.lockEnabled ? `<div class="field" style="margin:8px 0 4px"><label for="setLockAfter">Lock again after leaving the app</label>
@@ -1142,10 +1514,11 @@ function renderAppSettings(){
     <div class="kv"><span>Last backup</span><span>${esc(lb)}</span></div>
     ${s.lastBackupFile ? `<div class="kv"><span>File</span><span>${esc(s.lastBackupFile)}</span></div>` : ''}
     ${isNative && s.lastBackupError ? `<div class="form-err" style="margin:6px 0 0">Backup failed: ${esc(s.lastBackupError)}</div>` : ''}
+    ${!s.backupCrypto ? `<p class="small" style="margin:8px 0 0"><b>Tip:</b> set a backup password below. Without one, anyone who finds a backup file${isNative ? ' in the phone\u2019s Documents folder or your Google Drive' : ''} can read it.</p>` : ''}
     <div class="btn-row" style="margin-top:12px">${isNative?`<button class="btn" data-action="backup-now">Back up now</button>`:''}<button class="btn ${isNative?'btn-outline':''}" data-action="export">${isNative?'Share backup':'Export backup'}</button><button class="btn btn-outline" data-action="import">Restore</button></div>
     <div class="switch-row" style="border-top:1px solid var(--hair); margin-top:12px"><div><div class="list-title">Backup password</div><div class="list-sub">${s.backupCrypto ? 'On. Backups are encrypted and need the password to restore.' : 'Off. Anyone who gets a backup file can read it.'}</div></div>
       <button class="btn btn-outline" data-action="backup-pass" style="flex:none">${s.backupCrypto ? 'Change' : 'Set up'}</button></div>
-    ${gdCfg().email ? '' : `<p class="small muted" style="margin:10px 0 0">For a copy off the phone, sign in with Google above, or use Share backup.</p>`}
+    ${webApp() ? `<p class="small muted" style="margin:10px 0 0">Export saves a file: choose <b>Save to Files</b> (iCloud Drive) or email it to yourself. Restore it on any phone, including the Android app.</p>` : gdCfg().email ? '' : `<p class="small muted" style="margin:10px 0 0">For a copy off the phone, sign in with Google above, or use Share backup.</p>`}
     <p class="small muted" style="margin:12px 0 0">Stored: ${[[db.compounds.length,'compound'],[db.logs.length,'injection'],[db.labs.length,'lab result'],[(db.workouts||[]).length,'workout'],[(db.activities||[]).length,'run/walk/hike','runs/walks/hikes'],[Object.keys((db.health&&db.health.days)||{}).length,'day of watch data','days of watch data']].filter(([n],i)=>i<2 || n).map(([n,a,b])=>`${n} ${n===1?a:(b||a+'s')}`).join(' \u00b7 ')}</p>
   </div>
 `;
@@ -1159,14 +1532,14 @@ let sheetOpen = false;
 function openSheet(html){
   $('#sheetRoot').innerHTML = `<div class="sheet-bg" id="sheetBg"><div class="sheet" role="dialog" aria-modal="true"><button type="button" class="sheet-close" id="sheetClose" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>${html}</div></div>`;
   sheetOpen = true;
+  markTapRows($('#sheetRoot'));
   $('#sheetBg').addEventListener('click', e=>{ if(e.target.id==='sheetBg') closeSheet(); });
   $('#sheetClose').addEventListener('click', closeSheet);
   const sh = $('#sheetRoot .sheet');
-  // keep the field being typed in clear of the keyboard and the sticky Save bar; clear stale errors as the user fixes things
-  sh.addEventListener('focusin', e=>{ if(e.target.matches('input,select,textarea')) setTimeout(()=>{ if(document.activeElement===e.target) e.target.scrollIntoView({block:'center', behavior:'smooth'}); }, 350); });
+  // clear stale errors as the user fixes things (scrolling the field clear of the keyboard is done globally, below)
   sh.addEventListener('input', ()=>{ sh.querySelectorAll('.form-err').forEach(x=>{ if(x.textContent && !x.closest('#bkErr, #impErr')) x.textContent = ''; }); });
 }
-function closeSheet(){ $('#sheetRoot').innerHTML=''; sheetOpen = false; }
+function closeSheet(){ $('#sheetRoot').innerHTML=''; sheetOpen = false; if(closeSheet.stale){ closeSheet.stale = false; render(); } }
 function toast(msg, action){
   const t = $('#toast');
   t.innerHTML = `<span>${esc(msg)}</span>${action ? `<button type="button" class="toast-btn">${esc(action.label)}</button>` : ''}`;
@@ -1179,12 +1552,12 @@ function armButton(btn, label, fn){
   const orig = btn.innerHTML; btn.dataset.armed = '1'; btn.textContent = label;
   setTimeout(()=>{ if(btn.isConnected){ delete btn.dataset.armed; btn.innerHTML = orig; } }, 3000);
 }
-const segHtml = (id, opts, val) => `<div class="opt-grid" id="${id}">${opts.map(([v,l])=>`<button type="button" class="opt ${v===val?'active':''}" data-v="${esc(v)}">${l}</button>`).join('')}</div>`;
+const segHtml = (id, opts, val) => `<div class="opt-grid" id="${id}" role="group">${opts.map(([v,l])=>`<button type="button" class="opt ${v===val?'active':''}" aria-pressed="${v===val}" data-v="${esc(v)}">${l}</button>`).join('')}</div>`;
 function bindSeg(id, onChange){
   const root = document.getElementById(id);
   root.addEventListener('click', e=>{
     const b = e.target.closest('.opt'); if(!b) return;
-    root.querySelectorAll('.opt').forEach(o=>o.classList.toggle('active', o===b));
+    root.querySelectorAll('.opt').forEach(o=>{ o.classList.toggle('active', o===b); o.setAttribute('aria-pressed', String(o===b)); });
     onChange(b.dataset.v);
   });
 }
@@ -1230,7 +1603,7 @@ function openCompoundSheet(id){
     <div id="intervalBox" ${sch.type==='interval'?'':'hidden'}>
       <div class="field"><div class="opt-grid" id="cEveryQuick">${[[1,'Daily'],[2,'EOD'],[3,'E3D'],[3.5,'E3.5D'],[5,'E5D'],[7,'Weekly'],[10,'E10D'],[14,'E14D']].map(([v,l])=>`<button type="button" class="opt ${sch.every===v?'active':''}" data-v="${esc(v)}">${l}</button>`).join('')}</div></div>
       <div class="row2">
-        <div class="field"><label for="cEvery">Every (days)</label><input id="cEvery" type="number" inputmode="decimal" min="0.5" step="0.5" value="${esc(sch.every||'')}"></div>
+        <div class="field"><label for="cEvery">Every (days)</label><input id="cEvery" type="number" inputmode="decimal" min="1" max="365" step="0.5" value="${esc(sch.every||'')}"></div>
         <div class="field"><label for="cStart">First dose on</label><input id="cStart" type="date" value="${esc(sch.start || ymd(new Date()))}"></div>
       </div>
     </div>
@@ -1255,12 +1628,12 @@ function openCompoundSheet(id){
       <select id="cBarrel"><option value="">Not set</option>${BARRELS.map(b=>`<option ${c.barrel===b?'selected':''}>${b}</option>`).join('')}<option value="__custom" ${custom?'selected':''}>Other…</option></select>
       <input id="cBarrelCustom" style="margin-top:8px" placeholder="e.g. 2 mL" ${custom?'':'hidden'} value="${custom?esc(c.barrel):''}">
     </div>
-    <details class="more" ${c.vial?'open':''}><summary>Vial stock</summary>
+    <details class="more" ${c.vial?'open':''}><summary>Open vial</summary>
       <div class="row2">
         <div class="field"><label for="cVial">Vial size (mL)</label><input id="cVial" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 10" value="${esc(c.vial&&c.vial.sizeMl||'')}"></div>
         <div class="field"><label for="cRemain">Left now (mL)</label><input id="cRemain" type="number" inputmode="decimal" min="0" step="any" value="${c.vial&&c.vial.remainingMl!=null?round(c.vial.remainingMl,3):''}"></div>
       </div>
-      <div class="hint" style="margin:-6px 0 12px">Each logged injection subtracts its volume. For powder vials the size is the water you added.</div>
+      <div class="hint" style="margin:-6px 0 12px">Each logged injection subtracts its volume. For powder vials the size is the water you added. Sealed vials you have on hand go in the Stock tab.</div>
     </details>
     <details class="more" ${c.halfLife?'open':''}><summary>Half-life (for the levels chart)</summary>
       <div class="field"><label for="cHalf">Half-life (days)</label><input id="cHalf" type="number" inputmode="decimal" min="0" step="any" placeholder="From your prescriber or product info" value="${esc(c.halfLife||'')}"></div>
@@ -1385,12 +1758,12 @@ function openCompoundSheet(id){
     const rows = hist.slice().sort((a,b)=>a.from<b.from?1:-1);
     const today = ymd(new Date());
     box.innerHTML = rows.length ? rows.map(e=>`<div class="kv"><span>From ${esc(fmtDate(parseYmd(e.from)))}${e.from>today?' (planned)':''}</span>
-        <span>${esc(fmtAmt(e.dose, unit))} ${hist.length>1?`<button type="button" class="btn btn-danger" style="min-height:30px; padding:0 8px; margin-left:6px" data-hdel="${esc(e.from)}">✕</button>`:''}</span></div>`).join('')
+        <span>${esc(fmtAmt(e.dose, unit))} ${hist.length>1?`<button type="button" class="btn btn-danger" style="min-height:40px; min-width:44px; padding:0 8px; margin-left:6px" aria-label="Remove this dose change" data-hdel="${esc(e.from)}">✕</button>`:''}</span></div>`).join('')
       : '<div class="small muted" style="padding-bottom:10px">No planned dose yet.</div>';
     box.querySelectorAll('[data-hdel]').forEach(b=>b.addEventListener('click', ()=>{ hist = hist.filter(e=>e.from!==b.dataset.hdel); renderHist(); }));
   };
   renderHist();
-  // pause controls act immediately
+  // pause controls act immediately (without closing the sheet)
   const renderPause = ()=>{
     const box = f('pauseBox'); if(!box) return;
     const cur = currentPause(ex), up = upcomingPause(ex);
@@ -1401,7 +1774,8 @@ function openCompoundSheet(id){
       f('pauseEnd').addEventListener('click', ()=>{
         const today = ymd(new Date());
         if(cur && cur.from < today) cur.to = today; else ex.pauses = ex.pauses.filter(x=>x!==p);
-        save(); closeSheet(); render(); toast(cur ? `${ex.name} resumed` : 'Planned pause cancelled');
+        // the sheet stays open, so anything else being edited in it isn't lost
+        save(); renderPause(); render(); toast(cur ? `${ex.name} resumed` : 'Planned pause cancelled');
       });
     } else {
       box.innerHTML = `<div class="row2">
@@ -1413,7 +1787,7 @@ function openCompoundSheet(id){
         if(!from) return f('pErr').textContent = 'Pick the date the pause starts.';
         if(to && to <= from) return f('pErr').textContent = 'The resume date must be after the start.';
         ex.pauses = (ex.pauses||[]).concat([{from, to}]);
-        save(); closeSheet(); render(); toast(`${ex.name} paused${to?` until ${fmtShort(parseYmd(to))}`:''}`);
+        save(); renderPause(); render(); toast(`${ex.name} paused${to?` until ${fmtShort(parseYmd(to))}`:''}`);
       });
     }
   };
@@ -1434,7 +1808,7 @@ function openCompoundSheet(id){
     let schedule;
     if(type==='interval'){
       const every = num(f('cEvery').value);
-      if(!(every>=0.5)) return err.textContent = 'Enter how many days between doses (0.5 or more).';
+      if(!(every>=1 && every<=365)) return err.textContent = 'Enter how many days between doses: 1 to 365 (e.g. 3.5).';
       if(!f('cStart').value) return err.textContent = 'Pick the date of the first dose.';
       schedule = {type, every, start:f('cStart').value};
     } else {
@@ -1467,7 +1841,7 @@ function openCompoundSheet(id){
       dosePerInj: newDose, schedule, barrel,
       powderMg: form==='powder' ? num(f('cPowder').value) : null,
       waterMl: form==='powder' ? num(f('cWater').value) : null,
-      vial: vialSize>0 ? {sizeMl:vialSize, remainingMl: remain>=0 && isFinite(remain) ? Math.min(remain, vialSize) : vialSize} : null,
+      vial: vialSize>0 ? vialFromSheet(ex, vialSize, remain) : null,
       halfLife: half>0 ? half : null,
       sites: [...mySites].filter(x=>SITES[segVal('cRoute')].includes(x)),
       doseHistory: hist
@@ -1578,7 +1952,7 @@ function openLogSheet(opts={}){
     <h2>${ex?'Edit dose':'Log dose'}</h2>
     <div class="field"><label for="lComp">Compound</label><select id="lComp">${compOpts}</select></div>
     <div class="row2">
-      <div class="field"><label for="lDose">Dose (<span id="lUnit">${(c&&c.unit)||(ex&&ex.unit)||'mg'}</span>)</label><input id="lDose" type="number" inputmode="decimal" min="0" step="any"></div>
+      <div class="field"><label for="lDose">Dose (<span id="lUnit">${esc((c&&c.unit)||(ex&&ex.unit)||'mg')}</span>)</label><input id="lDose" type="number" inputmode="decimal" min="0" step="any"></div>
       <div class="field"><label for="lDate">Date &amp; time</label><input id="lDate" type="datetime-local" value="${toLocalInput(when)}"></div>
     </div>
     <div class="calc" id="lCalc"></div>
@@ -1648,7 +2022,8 @@ function openLogSheet(opts={}){
     if(dt - Date.now() > 36e5) return err.textContent = 'That time is in the future. Log doses after you take them.';
     const unit = unitOf();
     const mg = toMg(d, unit);
-    const strength = c ? c.strength : ex.strength;
+    // an edited log keeps the strength of the vial it came from (the compound may have moved to a new strength since)
+    const strength = ex && ex.compoundId===cid && ex.strength>0 ? ex.strength : (c ? c.strength : ex.strength);
     const vol = strength>0 ? mg/strength : null;
     const notes = f('lNotes').value.trim();
     if(ex){
@@ -1664,31 +2039,351 @@ function openLogSheet(opts={}){
   });
 }
 
+/* ================= Programmes (data) =================
+   A programme runs templates in turn for a set number of weeks. Weights still progress by double progression
+   (overloadFor); deload weeks use fewer sets at about 90% of the working weight, and low readiness or stalled
+   lifts suggest one. db.programmes = [{id, name, templateIds[], perWeek, weeks, start, deloadEvery, deloads[], active, endedAt}] */
+function normaliseProgrammes(list){
+  return (Array.isArray(list) ? list : []).filter(isObj).map(p=>({
+    id: typeof p.id==='string' && /^[\w.:-]{1,80}$/.test(p.id) ? p.id : uid(),
+    name: String(p.name || 'Programme').slice(0, 60),
+    templateIds: (Array.isArray(p.templateIds) ? p.templateIds : []).filter(x=>typeof x==='string').slice(0, 14),
+    perWeek: Math.min(7, Math.max(1, Math.round(+p.perWeek) || 3)),
+    weeks: Math.min(52, Math.max(1, Math.round(+p.weeks) || 8)),
+    start: okYmd(p.start) ? p.start : ymd(new Date()),
+    deloadEvery: [0,4,5,6,8].includes(+p.deloadEvery) ? +p.deloadEvery : 0,
+    deloads: [...new Set((Array.isArray(p.deloads) ? p.deloads : []).map(Number).filter(n=>Number.isInteger(n) && n>=1 && n<=52))],
+    active: p.active === true, endedAt: okYmd(p.endedAt) ? p.endedAt : null
+  })).slice(-50);
+}
+
+/* Body measurements (data): [{id, date, waist, chest, arm, thigh, hips, neck, calf (cm), bodyFat (%)}] */
+const MEASURES = [['waist','Waist','cm'],['chest','Chest','cm'],['arm','Arm (flexed)','cm'],['thigh','Thigh','cm'],['hips','Hips','cm'],['neck','Neck','cm'],['calf','Calf','cm'],['bodyFat','Body fat','%']];
+function normaliseMeasures(list){
+  return (Array.isArray(list) ? list : []).filter(x=>isObj(x) && okYmd(x.date)).map(x=>{
+    const o = {id: typeof x.id==='string' && /^[\w.:-]{1,80}$/.test(x.id) ? x.id : uid(), date: x.date};
+    MEASURES.forEach(([k])=>{ const v = +x[k], max = k==='bodyFat' ? 70 : 300; o[k] = x[k]!=null && v>0 && v<=max ? v : null; });
+    return o;
+  }).filter(o=>MEASURES.some(([k])=>o[k]!=null)).sort((a,b)=>a.date<b.date?-1:1).slice(-3000);
+}
+/* ================= Daily check-in =================
+   db.checkins = [{date:'YYYY-MM-DD', energy, mood, libido, sleepQ (1-5 or null), site:{logId, issues:[..]}|null, note}]
+   One per day. Shown against estimated levels (and blood tests) and in the doctor report. */
+const CHECK_FIELDS = [['energy','Energy'],['mood','Mood'],['libido','Libido'],['sleepQ','Sleep quality']];
+const SITE_ISSUES = [['sore','Sore'],['lump','Lump'],['red','Red or warm'],['itch','Itchy'],['bruise','Bruised']];
+const siteIssueLabel = k => (SITE_ISSUES.find(x=>x[0]===k) || [k, k])[1];
+function normaliseCheckins(list){
+  const byDay = new Map();
+  (Array.isArray(list) ? list : []).filter(isObj).forEach(x=>{
+    if(!okYmd(x.date)) return;
+    const o = {date:x.date};
+    CHECK_FIELDS.forEach(([k])=>{ const v = Math.round(+x[k]); o[k] = v>=1 && v<=5 ? v : null; });
+    if(isObj(x.site) && Array.isArray(x.site.issues)){
+      const issues = [...new Set(x.site.issues.filter(i=>SITE_ISSUES.some(s=>s[0]===i)))];
+      o.site = {logId: typeof x.site.logId==='string' ? x.site.logId.replace(/[^\w.:-]/g,'').slice(0,80) : null, issues};
+    } else o.site = null;
+    o.note = typeof x.note==='string' ? x.note.slice(0, 500) : '';
+    byDay.set(o.date, o);
+  });
+  return [...byDay.values()].sort((a,b)=>a.date<b.date?-1:1).slice(-5000);
+}
+const checkinOn = k => (db.checkins||[]).find(x=>x.date===k) || null;
+function checkinAvg(x){ const v = CHECK_FIELDS.map(([k])=>x[k]).filter(n=>n!=null); return v.length ? v.reduce((a,b)=>a+b,0)/v.length : null; }
+function checkinText(x){
+  const parts = CHECK_FIELDS.filter(([k])=>x[k]!=null).map(([k,l])=>`${k==='sleepQ'?'Sleep':l} ${x[k]}`);
+  if(x.site && x.site.issues.length) parts.push(`site: ${x.site.issues.map(siteIssueLabel).join(', ').toLowerCase()}`);
+  return parts.join(' · ') || 'No scores';
+}
+/* the injection a site reaction most likely belongs to: the latest one in the 3 days before the check-in day */
+function recentSiteLog(dayK){
+  const end = addDays(parseYmd(dayK), 1), start = addDays(parseYmd(dayK), -3);
+  return db.logs.filter(l=>!l.skipped && l.site && new Date(l.date) >= start && new Date(l.date) < end)
+    .sort((a,b)=>new Date(b.date)-new Date(a.date))[0] || null;
+}
+function checkinCardHtml(){
+  if(db.settings.checkin === false || !db.compounds.length) return '';
+  const k = ymd(new Date()), x = checkinOn(k);
+  if(x) return `<div class="card checkin-done tap-row" data-action="checkin-open" data-day="${esc(k)}" aria-label="Edit today's check-in">
+      <span class="alert-code" style="color:var(--muted)">CHECKED IN</span><span class="small">${esc(checkinText(x))}</span></div>`;
+  if(db.settings.checkinSkip === k) return '';
+  return `<div class="card checkin-card"><div><div class="list-title">How are you today?</div><div class="list-sub">Energy, mood, libido, sleep and any site reaction. About 10 seconds.</div></div>
+    <div class="foot-btns"><button class="btn btn-outline" data-action="checkin-skip">Not today</button><button class="btn" data-action="checkin-open" data-day="${esc(k)}">Check in</button></div></div>`;
+}
+function openCheckinSheet(dayK){
+  const k = okYmd(dayK) ? dayK : ymd(new Date());
+  if(k > ymd(new Date())) return toast('You can only check in for today or earlier.');
+  const ex = checkinOn(k), sl = recentSiteLog(k);
+  const siteIssues = new Set(ex && ex.site ? ex.site.issues : []);
+  const scale = [1,2,3,4,5].map(n=>[String(n), String(n)]);
+  openSheet(`<h2>Check-in</h2>
+    <p class="muted" style="margin-top:-6px">${esc(fmtDate(parseYmd(k)))}</p>
+    ${CHECK_FIELDS.map(([f,l])=>`<div class="field ci-field"><span class="field-label" id="cil_${f}">${esc(l)}</span>${segHtml('ci_'+f, scale, ex && ex[f]!=null ? String(ex[f]) : null).replace('role="group"', `role="group" aria-labelledby="cil_${f}"`)}<div class="ci-ends" aria-hidden="true"><span>Low</span><span>High</span></div></div>`).join('')}
+    ${sl ? `<div class="field"><span class="field-label">Injection site · ${esc(sl.site)}, ${esc(fmtShort(sl.date))}</span>
+      <div class="opt-grid" id="ciSite" role="group">${SITE_ISSUES.map(([v,l])=>`<button type="button" class="opt ${siteIssues.has(v)?'active':''}" aria-pressed="${siteIssues.has(v)}" data-v="${esc(v)}">${esc(l)}</button>`).join('')}</div>
+      <div class="hint">Leave these off if the site is fine.</div></div>` : ''}
+    <div class="field"><label for="ciNote">Note (optional)</label><textarea id="ciNote" maxlength="500" rows="2">${esc(ex ? ex.note : '')}</textarea></div>
+    <button class="btn btn-block" id="ciSave">Save</button><div class="form-err" id="ciErr" role="alert"></div>
+    ${ex ? `<button class="btn btn-danger btn-block" style="margin-top:10px" id="ciDel">Delete this check-in</button>` : ''}`);
+  const vals = {};
+  CHECK_FIELDS.forEach(([f])=>{
+    vals[f] = ex && ex[f]!=null ? ex[f] : null;
+    // tapping the chosen number again clears it
+    document.getElementById('ci_'+f).addEventListener('click', e=>{
+      const b = e.target.closest('.opt'); if(!b) return;
+      const v = +b.dataset.v, on = vals[f] !== v;
+      vals[f] = on ? v : null;
+      document.querySelectorAll(`#ci_${f} .opt`).forEach(o=>{ const a = on && o===b; o.classList.toggle('active', a); o.setAttribute('aria-pressed', String(a)); });
+    });
+  });
+  if(sl) $('#ciSite').addEventListener('click', e=>{
+    const b = e.target.closest('.opt'); if(!b) return;
+    const on = !siteIssues.has(b.dataset.v); on ? siteIssues.add(b.dataset.v) : siteIssues.delete(b.dataset.v);
+    b.classList.toggle('active', on); b.setAttribute('aria-pressed', String(on));
+  });
+  $('#ciSave').addEventListener('click', ()=>{
+    const note = $('#ciNote').value.trim().slice(0, 500);
+    if(CHECK_FIELDS.every(([f])=>vals[f]==null) && !siteIssues.size && !note) return $('#ciErr').textContent = 'Pick at least one score, or close this.';
+    const o = {date:k, ...vals, site: sl && siteIssues.size ? {logId: sl.id, issues:[...siteIssues]} : null, note};
+    db.checkins = normaliseCheckins((db.checkins||[]).filter(x=>x.date!==k).concat([o]));
+    save(); closeSheet(); render(); haptic('success'); toast('Check-in saved');
+  });
+  if(ex) $('#ciDel').addEventListener('click', e=>armButton(e.currentTarget, 'Tap again to delete', ()=>{
+    db.checkins = (db.checkins||[]).filter(x=>x.date!==k); save(); closeSheet(); render(); toast('Check-in deleted');
+  }));
+}
+/* the overlay on the levels chart: one score (or the average of all four) per day */
+const FEEL_OPTS = [['avg','Avg'],['energy','Energy'],['mood','Mood'],['libido','Libido'],['sleepQ','Sleep']];
+function feelValue(x, k){ return k==='avg' ? checkinAvg(x) : x[k]; }
+function feelChipsHtml(){
+  if(!(db.checkins||[]).length) return '';
+  const cur = ui.feel || 'avg';
+  return `<div class="feel-row"><span class="small muted">How you felt:</span><div class="chips" style="margin:0">${[['off','Off'], ...FEEL_OPTS].map(([k,l])=>`<button class="chip ${cur===k?'active':''}" data-action="feel-pick" data-k="${esc(k)}" aria-pressed="${cur===k}">${esc(l)}</button>`).join('')}</div></div>`;
+}
+function drawFeelOverlay(cv, st, col){
+  const k = ui.feel || 'avg'; if(k==='off' || !st) return [];
+  const {S, x, pad, W, H} = st;
+  const g = cv.getContext('2d');
+  const top = pad.t + 4, bot = H - pad.b - 4, yF = v => bot - (v-1)/4*(bot-top);
+  const pts = (db.checkins||[]).map(c=>{ const v = feelValue(c, k); if(v==null) return null; const d = parseYmd(c.date); d.setHours(12); return {t:+d, v, c}; })
+    .filter(p=>p && p.t >= S.start && p.t <= Math.min(S.end, S.now + 864e5));
+  if(!pts.length) return [];
+  const ink = col('--signal');
+  g.save();
+  g.strokeStyle = ink; g.globalAlpha = 0.55; g.lineWidth = 1.2; g.setLineDash([1,3]);
+  g.beginPath(); pts.forEach((p,i)=> i ? g.lineTo(x(p.t), yF(p.v)) : g.moveTo(x(p.t), yF(p.v))); g.stroke();
+  g.setLineDash([]); g.globalAlpha = 1; g.fillStyle = ink;
+  pts.forEach(p=>{ g.beginPath(); g.arc(x(p.t), yF(p.v), 2.6, 0, Math.PI*2); g.fill(); });
+  // right-hand scale: 1 to 5
+  const MONO = getComputedStyle(document.documentElement).getPropertyValue('--mono') || 'monospace';
+  g.font = `9px ${MONO}`; g.textAlign = 'right'; g.textBaseline = 'middle'; g.fillStyle = ink;
+  g.fillText('5', W - 1, yF(5)); g.fillText('1', W - 1, yF(1));
+  g.restore();
+  return pts.map(p=>({...p, px:x(p.t), py:yF(p.v)}));
+}
+/* no half-life yet: a small chart of the daily average for the last 4 weeks */
+function feelSvg(){
+  const today = dayStart(new Date()), start = addDays(today, -27);
+  const pts = (db.checkins||[]).filter(c=>c.date >= ymd(start)).map(c=>({d:diffDays(parseYmd(c.date), start), v:checkinAvg(c)})).filter(p=>p.v!=null);
+  if(pts.length < 2) return '';
+  const W = 320, H = 90, px = d => 8 + d/27*(W-16), py = v => H - 10 - (v-1)/4*(H-20);
+  return `<svg class="feel-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Your check-in average over the last 4 weeks">
+    <line x1="8" x2="${W-8}" y1="${py(3)}" y2="${py(3)}" class="feel-mid"/>
+    <polyline points="${pts.map(p=>`${round(px(p.d),1)},${round(py(p.v),1)}`).join(' ')}" class="feel-line"/>
+    ${pts.map(p=>`<circle cx="${round(px(p.d),1)}" cy="${round(py(p.v),1)}" r="2.6" class="feel-dot"/>`).join('')}
+  </svg><div class="small muted" style="display:flex; justify-content:space-between"><span>${esc(fmtShort(start))}</span><span>average of your scores, 1 to 5</span><span>Today</span></div>`;
+}
+
 /* ---------- Vial ---------- */
+/* sealed vials that go first: soonest expiry, then the order they were added */
+function byExpiry(list){ return list.map((x,i)=>[x,i]).sort((a,b)=>(a[0].expiry||'9999') < (b[0].expiry||'9999') ? -1 : (a[0].expiry||'9999') > (b[0].expiry||'9999') ? 1 : a[1]-b[1]).map(p=>p[0]); }
 function newVial(id){
-  const c = db.compounds.find(c=>c.id===id); if(!c || !c.vial) return;
+  const c = db.compounds.find(c=>c.id===id); if(!c) return;
+  const powder = isPowder(c);
+  // sealed vials in Stock: opening one takes it off the count (and brings its strength, price, expiry and batch)
+  const all = byExpiry(stockLines(c).filter(x=>x.count>0));
+  const avail = all.filter(x=>notExpired(x.expiry)).concat(all.filter(x=>!notExpired(x.expiry)));   // expired ones last, never picked for you
+  const same = x => powder ? Math.abs(x.powderMg - (+c.powderMg||0)) < 1e-9 : Math.abs(x.strength - c.strength) < 1e-9 && (!c.vial || Math.abs(x.sizeMl - c.vial.sizeMl) < 1e-9);
+  const fresh = avail.filter(x=>notExpired(x.expiry));
+  const pick0 = fresh.find(same) || fresh[0] || null;
+  const size0 = pick0 && !powder ? pick0.sizeMl : (c.vial ? c.vial.sizeMl : '');
+  const optLabel = x => `${lineLabel(c,x)}${x.expiry ? ` · ${notExpired(x.expiry) ? 'exp' : 'EXPIRED'} ${fmtShortY(parseYmd(x.expiry))}` : ''} (${x.count} sealed)`;
   openSheet(`<h2>Start a new vial</h2>
     <p class="muted" style="margin-top:-6px">${esc(c.name)}</p>
-    <div class="field"><label for="vSize">Vial size (mL)</label><input id="vSize" type="number" inputmode="decimal" min="0" step="any" value="${esc(c.vial.sizeMl)}"></div>
-    ${c.form==='powder'?`<div class="row2"><div class="field"><label for="vPowder">Powder (mg)</label><input id="vPowder" type="number" inputmode="decimal" step="any" value="${esc(c.powderMg||'')}"></div><div class="field"><label for="vWater">Water added (mL)</label><input id="vWater" type="number" inputmode="decimal" step="any" value="${esc(c.waterMl||'')}"></div></div>`:''}
+    ${avail.length ? `<div class="field"><span class="field-label">Which vial</span>${segHtml('vFrom', avail.map(x=>[x.id, esc(optLabel(x))]).concat([['none','Not from Stock']]), pick0 ? pick0.id : 'none')}</div>` : ''}
+    <div class="field" ${powder?'hidden':''}><label for="vSize">Vial size (mL)</label><input id="vSize" type="number" inputmode="decimal" min="0" step="any" value="${esc(size0)}"></div>
+    ${powder?`<div class="row2"><div class="field"><label for="vPowder">Powder (mg)</label><input id="vPowder" type="number" inputmode="decimal" step="any" value="${esc(pick0 ? pick0.powderMg : (c.powderMg||''))}"></div><div class="field"><label for="vWater">Water added (mL)</label><input id="vWater" type="number" inputmode="decimal" step="any" value="${esc(c.waterMl||'')}"></div></div>`:''}
+    <div class="calc" id="vNote" hidden></div>
     <button class="btn btn-block" id="vSave">Start new vial</button><div class="form-err" id="vErr" role="alert"></div>`);
+  let pick = pick0;
+  const note = ()=>{
+    const el = $('#vNote'), bits = [];
+    if(pick && !powder && Math.abs(pick.strength - c.strength) > 1e-9) bits.push(`Strength changes from ${round(c.strength,3)} to ${round(pick.strength,3)} mg/mL. Doses you log from now on use the new strength.`);
+    if(pick && pick.expiry && pick.expiry < ymd(new Date())) bits.push(`This vial ${expText(pick.expiry)}.`);
+    el.hidden = !bits.length; el.textContent = bits.join(' ');
+  };
+  if(avail.length) bindSeg('vFrom', v=>{
+    pick = avail.find(x=>x.id===v) || null;
+    if(pick && !powder) $('#vSize').value = pick.sizeMl;
+    if(pick && powder) $('#vPowder').value = pick.powderMg;
+    note();
+  });
+  note();
   $('#vSave').addEventListener('click', ()=>{
     let size = num($('#vSize').value);
-    if(c.form==='powder'){
+    if(powder){
       const p = num($('#vPowder').value), w = num($('#vWater').value);
       if(!(p>0 && w>0)) return $('#vErr').textContent = 'Enter the powder amount and water added.';
       c.powderMg = p; c.waterMl = w; c.strength = round(p/w, 6); size = w;
     }
     if(!(size>0)) return $('#vErr').textContent = 'Enter the vial size in mL.';
+    if(pick && !powder) c.strength = round(pick.strength, 6);
+    if(pick) pick.count = Math.max(0, pick.count - 1);
     c.vial = {sizeMl:size, remainingMl:size, openedAt:new Date().toISOString()};
-    save(); closeSheet(); render(); haptic(); toast('New vial started');
+    if(pick){ if(pick.price>0) c.vial.price = pick.price; if(pick.expiry) c.vial.expiry = pick.expiry; if(pick.batch) c.vial.batch = pick.batch; }
+    save(); closeSheet(); render(); haptic();
+    toast(pick ? `New vial started · ${sealedCount(c)} sealed left` : 'New vial started');
   });
 }
 
+/* ---------- Stock tab ---------- */
+function renderStock(){
+  if(!db.compounds.length) return `<div class="empty">Add a compound first. Then you can keep count of its vials here.</div><button class="btn btn-block" data-action="compound-add">Add compound</button>`;
+  const on = db.compounds.filter(c=>c.vial || stockTracked(c)), off = db.compounds.filter(c=>!(c.vial || stockTracked(c)));
+  let html = '';
+  // spending across everything with a price
+  const costs = on.map(costInfo).filter(Boolean);
+  if(costs.length){
+    const month = costs.reduce((t,x)=>t+x.month, 0), value = costs.reduce((t,x)=>t+x.value, 0);
+    html += `<div class="card stock-sum"><div class="kv"><span>Spending</span><span>about ${fmtMoney(month)} a month</span></div>
+      <div class="kv"><span>Stock worth</span><span>${fmtMoney(value)}</span></div>
+      ${costs.length < on.length ? `<div class="hint" style="margin-top:6px">Only compounds with a vial price are counted. Add a price to sealed vials to include the rest.</div>` : ''}</div>`;
+  }
+  html += on.map(stockCard).join('');
+  if(off.length){
+    html += `<div class="section-label">${on.length ? 'Not counted yet' : 'Your compounds'}</div><div class="card" style="padding-top:2px; padding-bottom:2px">` + off.map(c=>`<div class="list-item">
+      <div class="list-main"><div class="list-title">${esc(c.name)}</div><div class="list-sub">${esc(strengthLabel(c))}</div></div>
+      <button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add vials</button></div>`).join('') + `</div>`;
+  }
+  html += `<p class="small muted" style="text-align:center; margin:18px 8px 4px">Logged injections come off the open vial. Starting a new vial takes one off the sealed count (soonest expiry first).</p>`;
+  return html;
+}
+function stockCard(c){
+  const st = stockInfo(c), oh = onHand(c), lines = stockLines(c), tracked = lines.length > 0;
+  const tag = !tracked ? '' : oh.sealed ? '' : st && st.rem > 0 ? '<span class="tag tag-due">Last vial</span>' : '<span class="tag tag-late">None left</span>';
+  const r = stockRunway(c, oh.totalMg), rt = runwayText(c, r);
+  const short = r && r.short && diffDays(r.short, new Date()) <= 14;
+  const soon = ymd(addDays(new Date(), 30)), today = ymd(new Date());
+  const expBit = k => k ? ` · <span class="${k <= soon ? 'exp-warn' : ''}">${k < today ? 'expired' : 'exp'} ${esc(fmtShortY(parseYmd(k)))}</span>` : '';
+  let h = `<div class="card stock-card"><div class="card-head"><div class="grow"><div class="dose-name">${esc(c.name)}</div><div class="small muted">${esc(strengthLabel(c))}</div></div>${tag}</div>`;
+  h += `<div class="kv"><span>Open vial</span><span>${st ? `${round(st.rem,2)} / ${round(c.vial.sizeMl,2)} mL · ${fmtStock(oh.openMg, c.unit)}${expBit(c.vial.expiry)}` : 'None'}</span></div>`;
+  lines.forEach(x=>{
+    const lbl = lineLabel(c, x);
+    const extra = `${x.price>0 ? ` · ${fmtMoney(x.price)}` : ''}${expBit(x.expiry)}${x.batch ? ` · batch ${esc(x.batch)}` : ''}`;
+    h += `<div class="stock-line">
+      <div class="grow tap-row" data-action="stock-edit" data-id="${esc(c.id)}" data-line="${esc(x.id)}" aria-label="${esc(`Edit ${lbl} vials`)}"><div>Sealed · ${esc(lbl)}</div><div class="small muted">${fmtStock(sealedMg(c, x), c.unit)} each${extra}</div></div>
+      <div class="stepper"><button type="button" class="btn btn-outline" data-action="stock-dec" data-id="${esc(c.id)}" data-line="${esc(x.id)}" aria-label="${esc(`One fewer ${lbl} vial`)}" ${x.count?'':'disabled'}>−</button><span class="step-n" aria-label="${esc(`${x.count} sealed`)}">${x.count}</span><button type="button" class="btn btn-outline" data-action="stock-inc" data-id="${esc(c.id)}" data-line="${esc(x.id)}" aria-label="${esc(`One more ${lbl} vial`)}">+</button></div>
+    </div>`;
+  });
+  h += `<div class="kv"><span>On hand</span><span>${fmtStock(oh.totalMg, c.unit)}${oh.sealed ? ` · ${oh.sealed} sealed` : ''}${oh.expired ? ` · <span class="exp-warn">${oh.expired} expired not counted</span>` : ''}</span></div>`;
+  if(rt) h += `<div class="kv ${short?'low':''}"><span>Lasts</span><span>${esc(rt)}</span></div>`;
+  const ro = reorderInfo(c);
+  if(ro){
+    const txt = ro.ordered ? `ordered ${fmtShort(parseYmd(ro.ordered))}` : ro.due ? 'now' : `by ${fmtShortY(ro.by)}`;
+    h += `<div class="kv ${ro.due && !ro.ordered ? 'low' : ''}"><span>Reorder</span><span>${esc(txt)}</span></div>`;
+  }
+  const cost = costInfo(c);
+  if(cost && cost.week > 0) h += `<div class="kv"><span>Cost</span><span>${fmtMoney(cost.week)} a week · ${fmtMoney(cost.month)} a month</span></div>`;
+  h += `<div class="stock-btns"><button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add vials</button><button class="btn btn-outline" data-action="vial-new" data-id="${esc(c.id)}" aria-label="${esc(`Start a new vial of ${c.name}`)}">New vial</button></div></div>`;
+  return h;
+}
+function stepStock(cid, lineId, by){
+  const c = db.compounds.find(x=>x.id===cid), x = c && stockLines(c).find(y=>y.id===lineId); if(!x) return;
+  const n = Math.min(999, Math.max(0, x.count + by)); if(n===x.count) return;
+  x.count = n;
+  if(by > 0) delete c.orderedAt;           // vials arrived
+  save(); render();
+  const b = document.querySelector(`[data-action="${by>0?'stock-inc':'stock-dec'}"][data-line="${CSS.escape(lineId)}"]`);
+  if(b && !b.disabled) b.focus(); else if(b) { const o = document.querySelector(`[data-action="stock-inc"][data-line="${CSS.escape(lineId)}"]`); if(o) o.focus(); }
+}
+function openStockSheet(cid, lineId){
+  const c = db.compounds.find(x=>x.id===cid);
+  if(!c){
+    if(db.compounds.length===1) return openStockSheet(db.compounds[0].id);
+    return openSheet(`<h2>Add vials</h2><p class="muted" style="margin-top:-6px">Which compound?</p><div class="card" style="padding:0 14px">${db.compounds.map(x=>`<div class="list-item tap-row" data-action="stock-add" data-id="${esc(x.id)}">
+      <div class="list-main"><div class="list-title">${esc(x.name)}</div><div class="list-sub">${esc(strengthLabel(x))}</div></div>
+      <svg class="chev" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>`).join('')}</div>`);
+  }
+  const powder = isPowder(c), line = lineId ? stockLines(c).find(x=>x.id===lineId) : null;
+  if(lineId && !line) return;
+  const last = stockLines(c)[stockLines(c).length-1];
+  const size0 = line ? line.sizeMl : last && last.sizeMl ? last.sizeMl : c.vial ? c.vial.sizeMl : '';
+  const str0 = line ? line.strength : c.strength;
+  const pow0 = line ? line.powderMg : c.powderMg || '';
+  const price0 = line ? line.price : last && last.price ? last.price : '';
+  const moreOpen = line && (line.price || line.expiry || line.batch);
+  openSheet(`<h2>${line ? 'Sealed vials' : 'Add vials'}</h2>
+    <p class="muted" style="margin-top:-6px">${esc(c.name)}</p>
+    <div class="field"><label for="sCount">${line ? 'How many you have' : 'How many vials'}</label><input id="sCount" type="number" inputmode="numeric" min="${line?0:1}" max="999" step="1" value="${line ? line.count : 1}"></div>
+    ${powder ? `<div class="field"><label for="sPowder">Powder per vial (mg)</label><input id="sPowder" type="number" inputmode="decimal" min="0" step="any" value="${esc(pow0)}"></div>`
+      : `<div class="row2"><div class="field"><label for="sSize">Vial size (mL)</label><input id="sSize" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 10" value="${esc(size0)}"></div>
+        <div class="field"><label for="sStr">Strength (mg/mL)</label><input id="sStr" type="number" inputmode="decimal" min="0" step="any" value="${esc(str0||'')}"></div></div>`}
+    <details class="more" ${moreOpen?'open':''}><summary>Price, expiry and batch</summary>
+      <div class="row2">
+        <div class="field"><label for="sPrice">Price per vial (${esc(String(db.settings.currency||'$').slice(0,4))})</label><input id="sPrice" type="number" inputmode="decimal" min="0" step="any" value="${esc(price0||'')}"></div>
+        <div class="field"><label for="sExp">Expiry date</label><input id="sExp" type="date" value="${esc(line && line.expiry || '')}"></div>
+      </div>
+      <div class="field"><label for="sBatch">Batch or lot number</label><input id="sBatch" maxlength="40" autocomplete="off" value="${esc(line && line.batch || '')}"></div>
+      <div class="hint" style="margin:-6px 0 12px">All optional. With a price, the Stock tab shows what each compound costs a week and a month. Vials with an expiry date are warned about 30 days ahead, and the soonest to expire is opened first.</div>
+    </details>
+    <div class="calc" id="sCalc"></div>
+    <button class="btn btn-block" id="sSave">${line ? 'Save' : 'Add to stock'}</button><div class="form-err" id="sErr" role="alert"></div>
+    ${line ? `<button class="btn btn-danger btn-block" style="margin-top:10px" id="sDel">Remove these vials from Stock</button>` : ''}`);
+  const read = ()=>{
+    const count = num($('#sCount').value);
+    const x = powder ? {powderMg: num($('#sPowder').value)} : {sizeMl: num($('#sSize').value), strength: num($('#sStr').value)};
+    return {count, x, price: num($('#sPrice').value), expiry: $('#sExp').value, batch: $('#sBatch').value.trim().slice(0, 40)};
+  };
+  const calc = ()=>{
+    const {count, x, price} = read(), each = sealedMg(c, x);
+    const money = price>0 ? ` · ${fmtMoney(price / each)} per mg` : '';
+    $('#sCalc').textContent = each>0 && count>=0 ? `${fmtStock(each, c.unit)} per vial${count>1 ? ` · ${fmtStock(each*count, c.unit)} in all` : ''}${price>0 && each>0 ? money : ''}` : '';
+  };
+  $('#sheetRoot .sheet').addEventListener('input', calc); calc();
+  $('#sSave').addEventListener('click', ()=>{
+    const {count, x, price, expiry, batch} = read(), err = $('#sErr');
+    if(!(Number.isInteger(count) && count >= (line?0:1) && count <= 999)) return err.textContent = line ? 'Enter how many you have: 0 to 999.' : 'Enter how many vials: 1 to 999.';
+    if(powder){ if(!(x.powderMg>0 && x.powderMg<=1000000)) return err.textContent = 'Enter the powder in each vial, in mg.'; }
+    else {
+      if(!(x.sizeMl>0 && x.sizeMl<=1000)) return err.textContent = 'Enter the vial size in mL.';
+      if(!(x.strength>0 && x.strength<=100000)) return err.textContent = 'Enter the strength in mg/mL.';
+    }
+    if($('#sPrice').value.trim() && !(price>=0 && price<=1000000)) return err.textContent = 'Enter the price as a number, or leave it empty.';
+    if(expiry && !okYmd(expiry)) return err.textContent = 'Pick the expiry date, or leave it empty.';
+    const clean = powder ? {sizeMl:null, strength:null, powderMg: round(x.powderMg, 6)} : {sizeMl: round(x.sizeMl, 6), strength: round(x.strength, 6), powderMg:null};
+    Object.assign(clean, {price: price>0 ? round(price, 2) : null, expiry: expiry || null, batch});
+    const list = c.stock = stockLines(c);
+    // same kind of vial (and same expiry and batch) goes on the same line
+    const match = list.find(y=>y!==line && (y.expiry||null)===clean.expiry && (y.batch||'')===clean.batch &&
+      (powder ? Math.abs(y.powderMg - clean.powderMg) < 1e-9 : Math.abs(y.sizeMl - clean.sizeMl) < 1e-9 && Math.abs(y.strength - clean.strength) < 1e-9));
+    if(line){
+      if(match){ match.count = Math.min(999, match.count + count); if(clean.price) match.price = clean.price; list.splice(list.indexOf(line), 1); }   // edited into the same kind as another line: merge them
+      else Object.assign(line, clean, {count});
+    } else if(match){ match.count = Math.min(999, match.count + count); if(clean.price) match.price = clean.price; }
+    else { if(list.length >= 20) return err.textContent = 'That’s the most kinds of vial one compound can have.'; list.push({id:uid(), count, ...clean}); }
+    if(!line) delete c.orderedAt;           // new vials arrived: the reorder reminder starts again from here
+    save(); closeSheet(); render(); haptic(); toast(line ? 'Stock saved' : `Added ${count} ${count===1?'vial':'vials'}`);
+    firstPlanPermission();
+  });
+  if(line) $('#sDel').addEventListener('click', e=>armButton(e.currentTarget, 'Tap again to remove', ()=>{
+    c.stock = stockLines(c).filter(y=>y!==line); if(!c.stock.length) delete c.stock;
+    save(); closeSheet(); render(); toast('Removed from Stock');
+  }));
+}
 
 /* ================= Backup ================= */
 function backupJson(){
-  return JSON.stringify({app:'injection-tracker', version:2, exportedAt:new Date().toISOString(), ...db});
+  const settings = {...db.settings}; delete settings.purgePlainLocal; delete settings.purgePlainDrive;   // housekeeping for this phone only
+  return JSON.stringify({app:'injection-tracker', version:2, exportedAt:new Date().toISOString(), ...db, settings});
 }
 /* ---------- Backup password (optional) ----------
    With a backup password set, every backup (daily file, Google Drive, Share) is encrypted with AES-256-GCM using a key
@@ -1720,8 +2415,10 @@ async function backupPayload(){
   return JSON.stringify({app:'ets-encrypted', v:1, kdf:'PBKDF2-SHA256', iter:bc.iter, salt:bc.salt, iv:b64enc(iv), data:b64enc(ct)});
 }
 function isEncryptedBackup(text){ try{ const o = JSON.parse(String(text).trim()); return isObj(o) && o.app==='ets-encrypted' ? o : null; }catch(e){ return null; } }
+/* a backup's key-stretching count must be sane: too high would freeze the phone, too low would weaken later backups */
+function backupIter(o){ const n = +o.iter || BK_ITER; if(!(Number.isInteger(n) && n >= 100000 && n <= 5000000)) throw new Error('This backup file isn\u2019t valid.'); return n; }
 async function decryptBackup(o, pass){
-  const key = await deriveBackupKey(pass, o.salt, +o.iter || BK_ITER);
+  const key = await deriveBackupKey(pass, o.salt, backupIter(o));
   try{ const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv:b64dec(o.iv)}, key, b64dec(o.data)); return new TextDecoder().decode(pt); }
   catch(e){ throw new Error('That password doesn\u2019t open this backup.'); }
 }
@@ -1735,7 +2432,7 @@ function readBackupText(text, box){
     const go = async ()=>{
       const b = document.getElementById('bkOpen'); b.disabled = true; document.getElementById('bkErr').textContent = '';
       try{ const pass = document.getElementById('bkPass').value; const plain = await decryptBackup(enc, pass); const parsed = parseBackup(plain);
-        parsed._crypto = {pass, salt:enc.salt, iter:+enc.iter || BK_ITER}; resolve(parsed); }
+        parsed._crypto = {pass, salt:enc.salt, iter:backupIter(enc)}; resolve(parsed); }
       catch(e){ document.getElementById('bkErr').textContent = e.message; b.disabled = false; }
     };
     document.getElementById('bkOpen').addEventListener('click', go);
@@ -1761,8 +2458,12 @@ function openBackupPassword(){
     const salt = b64enc(crypto.getRandomValues(new Uint8Array(16)));
     const key = await deriveBackupKey(a, salt, BK_ITER);
     await rawSet(BK_KEY_STORE, b64enc(await crypto.subtle.exportKey('raw', key)));
+    const wasOff = !db.settings.backupCrypto;
     _bkKey = key; db.settings.backupCrypto = {salt, iter:BK_ITER};
-    save(); closeSheet(); render(); toast('Backups are now encrypted'); if(isNative) backupNow();
+    // turning a password on: older copies were readable without one, so the next backups replace them (phone folder
+    // and Google Drive). Changing an existing password keeps the older (already encrypted) backups.
+    if(wasOff){ db.settings.purgePlainLocal = true; db.settings.purgePlainDrive = !!gdCfg().email; }
+    save(); closeSheet(); render(); toast('Backups are now encrypted'); if(isNative){ backupNow(); gdBackup(false, true); }
   });
   if(on) $('#bpOff').addEventListener('click', e=>armButton(e.currentTarget, 'Tap again to turn off', async ()=>{
     db.settings.backupCrypto = null; _bkKey = null; await rawSet(BK_KEY_STORE, '');
@@ -1781,6 +2482,12 @@ async function exportBackup(){
       await Share.share({title:'Enhanced Training Studio backup', text:'Enhanced Training Studio backup', files:[r.uri], dialogTitle:'Save or send backup'});
       return;
     }catch(e){ if(String(e && e.message).match(/cancel/i)) return; }
+  }
+  if(webApp()){
+    if(await webSaveFile(new Blob([json], {type:'application/json'}), name, 'Enhanced Training Studio backup')){
+      db.settings.lastBackupAt = new Date().toISOString(); db.settings.lastBackupFile = name; save(); if(!sheetOpen) render(); toast('Backup saved');
+    }
+    return;
   }
   // Browser: copy to clipboard and show the text
   openSheet(`<h2>Export backup</h2>
@@ -1806,10 +2513,10 @@ function parseBackup(text){
   return {compounds, logs: Array.isArray(logs)?logs:[], activeWorkout: d.activeWorkout && Array.isArray(d.activeWorkout.items) ? d.activeWorkout : null,
     labs: Array.isArray(d.labs)?d.labs:[], health: isObj(raw.health) && isObj(raw.health.days) ? d.health : null,
     exercises: Array.isArray(d.exercises)?d.exercises:[], templates: Array.isArray(d.templates)?d.templates:[], workouts: Array.isArray(d.workouts)?d.workouts:[],
-    activities: Array.isArray(d.activities)?d.activities:[], settings: d.settings||{}, exportedAt: validDate(d.exportedAt) ? d.exportedAt : null};
+    activities: Array.isArray(d.activities)?d.activities:[], checkins: d.checkins || [], programmes: d.programmes || [], measures: d.measures || [], settings: d.settings||{}, exportedAt: validDate(d.exportedAt) ? d.exportedAt : null};
 }
 function backupSummary(p){
-  return `Found <b>${p.compounds.length}</b> compounds, <b>${p.logs.length}</b> injections, <b>${p.labs.length}</b> lab results, <b>${p.workouts.length}</b> workouts, <b>${p.activities.length}</b> runs/walks/hikes${p.exportedAt?` · saved ${esc(fmtDate(p.exportedAt))} ${esc(fmtTime(p.exportedAt))}`:''}.`;
+  return `Found <b>${p.compounds.length}</b> compounds, <b>${p.logs.length}</b> injections, <b>${p.labs.length}</b> lab results, <b>${p.workouts.length}</b> workouts, <b>${p.activities.length}</b> runs/walks/hikes, <b>${(p.checkins||[]).length}</b> check-ins${p.exportedAt?` · saved ${esc(fmtDate(p.exportedAt))} ${esc(fmtTime(p.exportedAt))}`:''}.`;
 }
 /* A copy of everything taken just before a restore or import, so it can be undone. */
 const SNAP_KEY = 'inj-data-v2-before-change';
@@ -1824,13 +2531,17 @@ async function undoSnapshot(){
 /* Replace everything with a parsed backup. Settings that belong to this phone (lock, reminders, band, Google account…) stay. */
 function applyBackup(parsed){
   takeSnapshot('restore');
-  db.compounds = parsed.compounds; db.logs = parsed.logs; db.labs = parsed.labs; db.health = parsed.health || {days:{}};
+  db.compounds = parsed.compounds; db.logs = parsed.logs; db.labs = parsed.labs; db.checkins = parsed.checkins || []; db.programmes = parsed.programmes || []; db.measures = parsed.measures || []; db.health = parsed.health || {days:{}};
   db.exercises = parsed.exercises; db.templates = parsed.templates; db.workouts = parsed.workouts; db.activities = parsed.activities;
   
   db.activeActivity = null; db.activeWorkout = parsed.activeWorkout; ui.draft = null; ui.tplEdit = null; ui.mode = 'inj';
+  // these belong to this phone: privacy and security choices, its band, Google account, watch-data link, calendar export
+  const PHONE_KEYS = ['lockEnabled','lockAfter','autoBackup','lastBackupAt','lastBackupFile','lastBackupError','reminders','secureScreen','privateNotifs',
+    'health','hr','gdrive','backupCrypto','purgePlainLocal','purgePlainDrive','calUntil','calSig','calCount','calNudgeOff','installHintOff'];
   const local = {};
-  ['lockEnabled','lockAfter','autoBackup','lastBackupAt','lastBackupFile','lastBackupError','reminders','secureScreen','health','hr','gdrive','backupCrypto'].forEach(k=>{ if(k in db.settings) local[k] = db.settings[k]; });
-  db.settings = Object.assign({}, DEFAULT_SETTINGS, parsed.settings, local);
+  PHONE_KEYS.forEach(k=>{ if(k in db.settings) local[k] = db.settings[k]; });
+  const fromBackup = Object.assign({}, parsed.settings); PHONE_KEYS.forEach(k=>{ delete fromBackup[k]; });
+  db.settings = Object.assign({}, DEFAULT_SETTINGS, fromBackup, local);
   // keep encrypting after restoring an encrypted backup on a new phone (same password); otherwise don't claim
   // encryption this phone has no key for
   if(parsed._crypto && !local.backupCrypto){
@@ -1903,7 +2614,9 @@ async function gdBackup(manual, force){
   try{
     const stamp = new Date(); const name = `ets-backup-${ymd(stamp)}-${String(stamp.getHours()).padStart(2,'0')}${String(stamp.getMinutes()).padStart(2,'0')}.json`;
     if(manual) suppressLockOnce();
-    await G.upload({name, data: await backupPayload(), keep: 10, interactive: !!manual});
+    const purge = !!(db.settings.backupCrypto && db.settings.purgePlainDrive);      // keep only this encrypted copy
+    await G.upload({name, data: await backupPayload(), keep: purge ? 1 : 10, interactive: !!manual});
+    if(purge) db.settings.purgePlainDrive = false;
     c.lastAt = stamp.toISOString(); db.settings.lastBackupAt = c.lastAt; if(!isNative || !db.settings.autoBackup) db.settings.lastBackupFile = "Google Drive"; c.lastError = null; c.needsSignIn = false; persistQuiet();
     if(manual) toast('Backed up to Google Drive');
     return true;
@@ -1970,12 +2683,13 @@ function showLock(){
   if(lock.locked) return;
   lock.locked = true;
   $('#lockScreen').hidden = false;
-  $('#app').setAttribute('aria-hidden','true');
+  // everything behind the lock is unreachable, including by screen readers and keyboard: the app, any open sheet, toasts
+  ['#app','#sheetRoot','#toast'].forEach(q=>{ const el = $(q); if(el){ el.setAttribute('aria-hidden','true'); el.inert = true; } });
 }
 function hideLock(){
   lock.locked = false;
   $('#lockScreen').hidden = true;
-  $('#app').removeAttribute('aria-hidden');
+  ['#app','#sheetRoot','#toast'].forEach(q=>{ const el = $(q); if(el){ el.removeAttribute('aria-hidden'); el.inert = false; } });
   lock.pending.splice(0).forEach(fn=>{ try{ fn(); }catch(e){} });
 }
 /* One biometric attempt at a time. Leaving the app mid-prompt can leave the native call hanging
@@ -2087,6 +2801,7 @@ function openReportSheet(){
       <label class="switch-row"><span>Estimated levels charts</span><span class="switch"><input type="checkbox" id="rCharts" ${s.reportCharts!==false?'checked':''}><span></span></span></label>
       <label class="switch-row"><span>Full injection log</span><span class="switch"><input type="checkbox" id="rLog" ${s.reportLog!==false?'checked':''}><span></span></span></label>
       <label class="switch-row"><span>Notes on injections</span><span class="switch"><input type="checkbox" id="rNotes" ${s.reportNotes?'checked':''}><span></span></span></label>
+      ${(db.checkins||[]).length ? `<label class="switch-row"><span>How I felt (check-ins)</span><span class="switch"><input type="checkbox" id="rFeel" ${s.reportFeel!==false?'checked':''}><span></span></span></label>` : ''}
       ${''}
     </div>
     <div class="sheet-actions"><button class="btn btn-block" id="rGo">Create PDF</button><div class="form-err" id="rErr" role="alert" style="margin-top:6px; min-height:0"></div></div>
@@ -2094,8 +2809,8 @@ function openReportSheet(){
   bindSeg('rPeriod', ()=>{});
   $('#rGo').addEventListener('click', async ()=>{
     const btn = $('#rGo'), err = $('#rErr'); err.textContent = '';
-    const opts = { months: +segVal('rPeriod'), name: $('#rName').value.trim(), charts: $('#rCharts').checked, log: $('#rLog').checked, notes: $('#rNotes').checked, health: !!($('#rHealth') && $('#rHealth').checked) };
-    Object.assign(db.settings, {reportMonths:opts.months, reportName:opts.name, reportCharts:opts.charts, reportLog:opts.log, reportNotes:opts.notes, reportHealth:opts.health});
+    const opts = { months: +segVal('rPeriod'), name: $('#rName').value.trim(), charts: $('#rCharts').checked, log: $('#rLog').checked, notes: $('#rNotes').checked, health: !!($('#rHealth') && $('#rHealth').checked), feel: !!($('#rFeel') && $('#rFeel').checked) };
+    Object.assign(db.settings, {reportMonths:opts.months, reportName:opts.name, reportCharts:opts.charts, reportLog:opts.log, reportNotes:opts.notes, reportHealth:opts.health, ...($('#rFeel') ? {reportFeel:opts.feel} : {})});
     save();
     btn.disabled = true; btn.textContent = 'Creating…';
     try{
@@ -2120,6 +2835,7 @@ async function deliverPdf(doc, name){
     catch(e){ if(!/cancel/i.test(String(e && e.message))) throw e; }
     return;
   }
+  if(webApp()){ await webSaveFile(doc.output('blob'), name, 'Injection report'); return; }
   // browser: open the PDF in a new tab (downloads may be blocked)
   const url = URL.createObjectURL(doc.output('blob'));
   const w = window.open(url, '_blank');
@@ -2193,7 +2909,7 @@ function buildReport(jsPDF, opts){
   heading('Summary');
   const taken = D.logs.filter(l=>!l.skipped).length;
   const allSched = D.adherence.reduce((a,x)=>a+x.sched,0), allTaken = D.adherence.reduce((a,x)=>a+x.taken,0);
-  const tests = labTests().filter(t=>t.at >= D.start && t.at <= D.end);
+  const tests = labTests().filter(t=>t.date >= ymd(D.start) && t.date <= ymd(D.end));    // by date, like the table below
   const lastTest = tests[tests.length-1];
   const summary = [
     ['Compounds', (()=>{ const fin = c=>{ const cy = cycleState(c); return cy && cy.state==='done'; };
@@ -2229,16 +2945,16 @@ function buildReport(jsPDF, opts){
     (c.doseHistory||[]).slice().sort((a,b)=>a.from<b.from?-1:1).forEach((e,i,arr)=>{
       if(i===0) return;
       const d = parseYmd(e.from); if(d < D.start) return;
-      changes.push([fmtD(d), c.name, `Dose ${fmtAmt(arr[i-1].dose,c.unit)} to ${fmtAmt(e.dose,c.unit)}${d>new Date()?' (planned)':''}`]);
+      changes.push([+d, c.name, `Dose ${fmtAmt(arr[i-1].dose,c.unit)} to ${fmtAmt(e.dose,c.unit)}${d>new Date()?' (planned)':''}`]);
     });
     (c.pauses||[]).forEach(p=>{
       const d = parseYmd(p.from); if(p.to && parseYmd(p.to) < D.start) return;
-      changes.push([fmtD(d), c.name, `Paused${p.to?` until ${fmtD(parseYmd(p.to))}`:''}`]);
+      changes.push([+d, c.name, `Paused${p.to?` until ${fmtD(parseYmd(p.to))}`:''}`]);
     });
   });
   if(changes.length){
     heading('Dose changes and pauses');
-    at({...tableBase, startY:y, head:[['Date','Compound','Change']], body:changes.sort((a,b)=>new Date(a[0])-new Date(b[0])), columnStyles:{0:{cellWidth:28}, 1:{cellWidth:36}}});
+    at({...tableBase, startY:y, head:[['Date','Compound','Change']], body:changes.sort((a,b)=>a[0]-b[0]).map(([t, ...r])=>[fmtD(new Date(t)), ...r]), columnStyles:{0:{cellWidth:28}, 1:{cellWidth:36}}});
     y = doc.lastAutoTable.finalY + 6;
   }
 
@@ -2285,26 +3001,67 @@ function buildReport(jsPDF, opts){
   // ---- blood tests
   if(D.labs.length){
     heading('Blood tests');
-    const dates = [...new Set(D.labs.map(r=>r.date))].sort().reverse().slice(0, 5);
+    const allDates = [...new Set(D.labs.map(r=>r.date))].sort().reverse();
     const order = ['Total testosterone','Free testosterone','SHBG','Oestradiol (E2)','LH','FSH','Prolactin','PSA','Haematocrit','Haemoglobin'];
-    const markers = [...new Set(D.labs.filter(r=>dates.includes(r.date)).map(r=>r.marker))].sort((a,b)=>{
-      const ia = order.indexOf(a), ib = order.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b);
+    // one row per test and unit: a result in a different unit gets its own row rather than sharing a column label
+    const uKey = r => `${r.marker}\u0000${String(r.unit||'').trim()}`;
+    const rowKeys = [...new Set(D.labs.map(uKey))].sort((a,b)=>{
+      const [ma] = a.split('\u0000'), [mb] = b.split('\u0000'), ia = order.indexOf(ma), ib = order.indexOf(mb);
+      return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b);
     });
-    const cellOf = (m, d)=>{ const r = D.labs.find(x=>x.marker===m && x.date===d); return r ? `${labValueText(r)}${r.flag?' '+r.flag:''}` : ''; };
-    const rangeOf = m => { const r = D.labs.filter(x=>x.marker===m && x.refText).sort((a,b)=>a.date<b.date?1:-1)[0]; return r ? r.refText : ''; };
-    const unitOf = m => { const r = D.labs.find(x=>x.marker===m && x.unit); return r ? r.unit : ''; };
-    const timingRow = ['Time since last dose', '', '', ...dates.map(d=>{ const t = labTests().find(x=>x.date===d); return t ? (labTimingText(t.at).replace(/ after .*/,'') || '—') : ''; })];
-    const body = [timingRow, ...markers.map(m=>[m, unitOf(m), rangeOf(m), ...dates.map(d=>cellOf(m,d))])];
-    at({...tableBase, startY:y, head:[['Test','Unit','Range', ...dates.map(d=>fmtD(parseYmd(d)))]], body,
-      columnStyles:{0:{fontStyle:'bold', cellWidth:38}, 1:{textColor:MUTED, cellWidth:18}, 2:{textColor:MUTED, cellWidth:22}},
-      didParseCell: h=>{
-        if(h.section!=='body') return;
-        if(h.row.index===0){ h.cell.styles.textColor = MUTED; h.cell.styles.fontStyle = 'italic'; }
-        if(h.column.index>=3){ h.cell.styles.halign = 'right'; if(/ [HL]$/.test(String(h.cell.raw))){ h.cell.styles.textColor = SIG; h.cell.styles.fontStyle = 'bold'; } }
-        if(h.column.index>=1 && h.column.index<3) h.cell.styles.fontSize = 7.4;
-      }});
-    y = doc.lastAutoTable.finalY + 2;
+    const cellOf = (k, d)=>{ const r = D.labs.find(x=>uKey(x)===k && x.date===d); return r ? `${labValueText(r)}${r.flag?' '+r.flag:''}` : ''; };
+    const rangeOf = k => { const r = D.labs.filter(x=>uKey(x)===k && x.refText).sort((a,b)=>a.date<b.date?1:-1)[0]; return r ? r.refText : ''; };
+    // five test dates per table, newest first; every date in the period is included
+    for(let p = 0; p < allDates.length; p += 5){
+      const dates = allDates.slice(p, p + 5);
+      if(p) { para(`Blood tests (continued, ${p+1}\u2013${p+dates.length} of ${allDates.length} test dates)`, 8.5, MUTED); y += 1; }
+      const keys = rowKeys.filter(k=>dates.some(d=>cellOf(k, d)));
+      const timingRow = ['Time since last dose', '', '', ...dates.map(d=>{ const t = labTests().find(x=>x.date===d); return t ? (labTimingText(t.at) || '\u2014') : ''; })];
+      const body = [timingRow, ...keys.map(k=>{ const [m, unit] = k.split('\u0000'); return [m, unit, rangeOf(k), ...dates.map(d=>cellOf(k,d))]; })];
+      at({...tableBase, startY:y, head:[['Test','Unit','Range', ...dates.map(d=>fmtD(parseYmd(d)))]], body,
+        columnStyles:{0:{fontStyle:'bold', cellWidth:38}, 1:{textColor:MUTED, cellWidth:18}, 2:{textColor:MUTED, cellWidth:22}},
+        didParseCell: h=>{
+          if(h.section!=='body') return;
+          if(h.row.index===0){ h.cell.styles.textColor = MUTED; h.cell.styles.fontStyle = 'italic'; h.cell.styles.fontSize = 7; }
+          if(h.column.index>=3){ h.cell.styles.halign = 'right'; if(/ [HL]$/.test(String(h.cell.raw))){ h.cell.styles.textColor = SIG; h.cell.styles.fontStyle = 'bold'; } }
+          if(h.column.index>=1 && h.column.index<3) h.cell.styles.fontSize = 7.4;
+        }});
+      y = doc.lastAutoTable.finalY + 4;
+    }
+    y -= 2;
     para('H / L = above / below the reference range printed on the lab report. "Time since last dose" is from the injection log.', 7.5, MUTED);
+    y += 3;
+  }
+
+  // ---- how the patient felt (daily check-ins): weekly averages, then site reactions
+  const cis = opts.feel ? (db.checkins||[]).filter(x=>parseYmd(x.date) >= D.start && parseYmd(x.date) <= D.end) : [];
+  if(cis.length){
+    heading('How I felt (daily check-ins)');
+    const weeks = [];
+    for(let w=0; w<8; w++){
+      const endD = addDays(dayStart(new Date()), -7*w), startD = addDays(endD, -6);
+      if(endD < D.start) break;
+      const inW = cis.filter(x=>x.date >= ymd(startD) && x.date <= ymd(endD));
+      if(inW.length) weeks.push({endD, inW});
+    }
+    weeks.reverse();
+    if(weeks.length){
+      const cell = (list, k)=>{ const v = list.map(x=>x[k]).filter(n=>n!=null); return v.length ? (v.reduce((a,b)=>a+b,0)/v.length).toFixed(1) : ''; };
+      const body = CHECK_FIELDS.map(([k,l])=>[l, ...weeks.map(w=>cell(w.inW, k))]).concat([['Days checked in', ...weeks.map(w=>String(w.inW.length))]]);
+      at({...tableBase, startY:y, head:[['Weekly average, last 8 weeks (1\u20135)', ...weeks.map(w=>`w/e ${fmtShort(w.endD)}`)]], body,
+        styles:{...tableBase.styles, fontSize:7.6}, columnStyles:{0:{fontStyle:'bold', cellWidth:40}},
+        didParseCell: h=>{ if(h.section==='body' && h.column.index>0) h.cell.styles.halign = 'right'; if(h.section==='body' && h.row.index===CHECK_FIELDS.length) h.cell.styles.textColor = MUTED; }});
+      y = doc.lastAutoTable.finalY + 3;
+    }
+    const reacts = cis.filter(x=>x.site && x.site.issues.length);
+    if(reacts.length){
+      const rows = reacts.map(x=>{ const l = db.logs.find(g=>g.id===x.site.logId); return [fmtD(parseYmd(x.date)), l ? `${l.site || ''}${l.site ? ', ' : ''}injected ${fmtShort(l.date)}` : '', x.site.issues.map(siteIssueLabel).join(', ')]; });
+      at({...tableBase, startY:y, head:[['Check-in','Injection','Site reaction']], body:rows, styles:{...tableBase.styles, fontSize:7.6}});
+      y = doc.lastAutoTable.finalY + 2;
+    }
+    const noted = cis.filter(x=>x.note);
+    if(noted.length && opts.notes) noted.slice(-12).forEach(x=>para(`${fmtD(parseYmd(x.date))}: ${x.note}`, 7.8));
+    para('Scores are the patient\u2019s own daily ratings from 1 (low) to 5 (high).', 7.5, MUTED);
     y += 3;
   }
 
@@ -2376,7 +3133,10 @@ async function autoBackup(force){
     try{
       const r = await FS.readdir({path:BACKUP_DIR, directory:'DOCUMENTS'});
       const files = (r.files||[]).map(f=>typeof f==='string'?f:f.name).filter(n=>/^ets-backup-\d{4}-\d{2}-\d{2}\.json$/.test(n)).sort();
-      for(const f of files.slice(0, -14)) { try{ await FS.deleteFile({path:`${BACKUP_DIR}/${f}`, directory:'DOCUMENTS'}); }catch(e){} }
+      // just turned on a backup password: remove every older (unencrypted) copy, keep only the one just written
+      const purge = db.settings.backupCrypto && db.settings.purgePlainLocal;
+      for(const f of (purge ? files.filter(n=>n!==name) : files.slice(0, -14))) { try{ await FS.deleteFile({path:`${BACKUP_DIR}/${f}`, directory:'DOCUMENTS'}); }catch(e){} }
+      if(purge) db.settings.purgePlainLocal = false;
     }catch(e){}
     persistQuiet();
     return true;
@@ -2400,7 +3160,8 @@ let lastRemSig = null;
    so the native cancel + reschedule only happens when one of these actually changed. */
 function reminderSig(){
   const s = db.settings, since = ymd(addDays(new Date(), -70));
-  return JSON.stringify([ymd(new Date()), s.reminders, s.morning, s.night, s.privateNotifs, db.compounds,
+  return JSON.stringify([ymd(new Date()), s.reminders, s.morning, s.night, s.privateNotifs, db.compounds, s.planNotifs, s.checkin, s.checkinRemind, s.leadDays,
+    s.labPlan, s.labPlanFrom, (db.checkins||[]).slice(-15).map(x=>x.date), db.labs.length && labTests().length ? +labTests()[labTests().length-1].at : 0,
     db.logs.filter(l=>ymd(l.date) >= since).map(l=>[l.compoundId, l.date, !!l.skipped])]);
 }
 async function doScheduleReminders(force){
@@ -2419,10 +3180,11 @@ async function doScheduleReminders(force){
       return !ids.some(id=>{ const c = db.compounds.find(c=>c.id===id); return c && statusFor(c).due; });
     });
     if(drop.length) await LN.cancel({notifications: drop.map(n=>({id:n.id}))});
-    if(!db.settings.reminders) return;
+    const plan = plannerEvents();
+    if(!db.settings.reminders && !plan.length) return;
     const now = new Date(), today = dayStart(now), until = addDays(today, 60);
     const groups = {};
-    db.compounds.forEach(c=>{
+    if(db.settings.reminders) db.compounds.forEach(c=>{
       if(!hasSchedule(c)) return;
       timeline(c, today, until).forEach(t=>{
         if(t.status==='taken' || t.status==='skipped') return;
@@ -2446,8 +3208,44 @@ async function doScheduleReminders(force){
         actionTypeId: 'DOSE', extra: {ids: g.ids, day: d}
       };
     });
+    // stock, blood test and check-in reminders (only with notification permission; they're never asked for from here)
+    if(plan.length){
+      const perm = await LN.checkPermissions().catch(()=>null);
+      if(perm && perm.display==='granted') plan.forEach((e, i)=>notifications.push({
+        id: PLAN_BASE + i, title: db.settings.privateNotifs ? 'Reminder' : e.title,
+        body: db.settings.privateNotifs ? 'Open the app to see what it is.' : e.body,
+        schedule: {at: e.at, allowWhileIdle: true}, channelId: 'planner', smallIcon: 'ic_stat_injection', extra: {route: e.route, ...(e.day ? {day: e.day} : {})}
+      }));
+    }
     if(notifications.length) await LN.schedule({notifications});
   }catch(e){ lastRemSig = null; console.warn('reminders', e); }
+}
+/* Dated reminders besides doses: reorder, expiring vials, the next blood test, and the daily check-in. */
+const PLAN_BASE = 1900000400;
+function plannerEvents(){
+  const s = db.settings, out = [], now = new Date(), today = dayStart(now);
+  const at = (d, hhmm) => { const x = new Date(d); const [h,m] = hm(hhmm || '08:00'); x.setHours(h,m,0,0); return x; };
+  if(s.planNotifs !== false){
+    db.compounds.forEach(c=>{
+      const ro = reorderInfo(c);
+      if(ro && !ro.ordered) out.push({at: at(ro.due ? addDays(today, 1) : ro.by, s.morning), title: 'Time to reorder',
+        body: `${c.name}: your stock lasts until about ${fmtShortY(ro.runway.last || today)}. Delivery takes about ${leadDays()} days.`, route: 'stock'});
+      const exps = stockLines(c).filter(x=>x.count>0 && x.expiry).map(x=>({k:x.expiry, what:`${x.count} sealed ${x.count===1?'vial':'vials'}${x.batch ? ` (batch ${x.batch})` : ''}`}));
+      if(c.vial && c.vial.expiry && (c.vial.remainingMl ?? c.vial.sizeMl) > 0) exps.push({k:c.vial.expiry, what:'your open vial'});
+      exps.forEach(e=>{
+        out.push({at: at(addDays(parseYmd(e.k), -30), s.morning), title: 'Vials expire in 30 days', body: `${c.name}: ${e.what} ${e.what.startsWith('your') ? 'expires' : 'expire'} ${fmtShortY(parseYmd(e.k))}.`, route: 'stock'});
+        out.push({at: at(parseYmd(e.k), s.morning), title: 'Vials expire today', body: `${c.name}: ${e.what} ${e.what.startsWith('your') ? 'expires' : 'expire'} today.`, route: 'stock'});
+      });
+    });
+    
+  }
+  if(s.checkinRemind && s.checkin !== false){
+    for(let k=0; k<14; k++){
+      const d = addDays(today, k); if(checkinOn(ymd(d))) continue;
+      out.push({at: at(d, s.night), title: 'Daily check-in', body: 'How was today? Rate your energy, mood, libido and sleep.', route: 'checkin', day: ymd(d)});
+    }
+  }
+  return out.filter(e=>e.at > now && e.at < addDays(now, 60)).sort((a,b)=>a.at-b.at).slice(0, 120);
 }
 const SNOOZE_BASE = 2000000000;
 /* Log the planned dose for each compound in a reminder, at the suggested site. */
@@ -2479,6 +3277,8 @@ async function handleNotificationAction(a){
   closeSheet();
   if(n.id === REST_NOTIF_ID || n.channelId === 'rest'){ ui.mode = 'train'; ui.tab = 'workout'; render(); return; }
   if(n.id === WEEKLY_NOTIF_ID || extra.route === 'weekly'){ ui.mode = 'health'; ui.tab = 'hweek'; ui.weekOff = 0; render(); return; }
+  if(extra.route === 'stock' || extra.route === 'labs'){ ui.mode = 'inj'; ui.tab = extra.route==='labs' && premiumOn() ? 'labs' : 'stock'; render(); return; }
+  if(extra.route === 'checkin'){ ui.mode = 'inj'; ui.tab = 'today'; render(); openCheckinSheet(okYmd(extra.day) && extra.day <= ymd(new Date()) ? extra.day : ymd(new Date())); return; }
   ui.mode = 'inj'; ui.tab = 'today';
   if(a.actionId==='log'){
     const {done, needInput} = quickLog(ids);
@@ -2522,6 +3322,16 @@ async function enableReminders(on){
   db.settings.reminders = on; save(); render();
   toast(on ? 'Reminders on' : 'Reminders off');
 }
+/* the first time stock or a blood test plan is set up, ask for the permission the planning reminders need */
+function firstPlanPermission(){
+  if(!isNative || db.settings.planNotifs === false || db.settings.planAsked) return;
+  db.settings.planAsked = true; save(); askNotifPermission();
+}
+/* planning reminders work without dose reminders, but need Android's permission to notify */
+async function askNotifPermission(){
+  const LN = plugin('LocalNotifications'); if(!LN) return;
+  try{ let p = await LN.checkPermissions(); if(p.display!=='granted') p = await LN.requestPermissions(); if(p.display!=='granted') toast('Notifications are turned off for this app in Android settings.'); doScheduleReminders(true); }catch(e){}
+}
 async function testNotification(){
   const LN = plugin('LocalNotifications'); if(!LN) return;
   try{
@@ -2535,7 +3345,7 @@ async function testNotification(){
 /* ================= Events ================= */
 document.addEventListener('click', e=>{
   const rangeBtn = e.target.closest('#hRange .opt');
-  if(rangeBtn){ ui.hRange = +rangeBtn.dataset.v; render(); return; }
+  if(rangeBtn){ ui.hRange = +rangeBtn.dataset.v; ui.hShow = 0; render(); return; }
   const tabBtn = e.target.closest('.tab-btn');
   if(tabBtn){ ui.tab = tabBtn.dataset.tab; render(); $('#main').scrollTop = 0; return; }
   const modeBtn = e.target.closest('.mode-btn');
@@ -2553,6 +3363,15 @@ document.addEventListener('click', e=>{
     case 'cycle-next': closeSheet(); openNextCycleSheet(id); break;
     case 'compound-edit': openCompoundSheet(id); break;
     case 'vial-new': newVial(id); break;
+    case 'stock-add': openStockSheet(id); break;
+    case 'checkin-open': openCheckinSheet(a.dataset.day); break;
+    case 'checkin-skip': db.settings.checkinSkip = ymd(new Date()); save(); render(); break;
+    case 'feel-pick': ui.feel = a.dataset.k; render(); break;
+    case 'stock-edit': openStockSheet(id, a.dataset.line); break;
+    case 'stock-inc': stepStock(id, a.dataset.line, 1); break;
+    case 'stock-dec': stepStock(id, a.dataset.line, -1); break;
+    case 'stock-ordered': { const c = db.compounds.find(x=>x.id===id); if(c){ c.orderedAt = ymd(new Date()); save(); render(); toast('Marked as ordered. Add the vials when they arrive.'); } } break;
+    case 'go-stock': ui.mode = 'inj'; ui.tab = 'stock'; render(); $('#main').scrollTop = 0; break;
     case 'chart-compound': ui.chartCompound = id; render(); break;
     case 'chart-weeks': ui.chartWeeks = +a.dataset.w; render(); break;
     
@@ -2563,11 +3382,35 @@ document.addEventListener('click', e=>{
     
     
     
+    
+    
+    
+    
     case 'export': exportBackup(); break;
     case 'import': openImport(); break;
     case 'rem-test': testNotification(); break;
     case 'backup-now': backupNow(); break;
     case 'report': openReportSheet(); break;
+    
+    case 'ih-more': ui.ihLimit = (ui.ihLimit||60) + 60; render(); break;
+    case 'cal-export': calExport(); break;
+    case 'cal-nudge-off': db.settings.calNudgeOff = true; save(); render(); break;
+    case 'install-hint-off': db.settings.installHintOff = true; save(); render(); break;
+    case 'web-reload': webReload(); break;
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     
     
     
@@ -2592,6 +3435,9 @@ document.addEventListener('click', e=>{
     
     case 'app-back': ui.tab = 'setup'; render(); break;
     case 'app-settings': ui.tab = 'app'; render(); $('#main').scrollTop = 0; break;
+    
+    
+    
     
     
     
@@ -2620,6 +3466,11 @@ document.addEventListener('change', e=>{
   
   
   else if(t.id==='setLow'){ const n = parseInt(t.value,10); if(n>=0){ db.settings.lowStockDoses = n; save(); } }
+  else if(t.id==='setCheckin'){ db.settings.checkin = t.checked; save(); }
+  else if(t.id==='setCiRem'){ db.settings.checkinRemind = t.checked; save(); if(t.checked) askNotifPermission(); toast(t.checked ? 'Check-in reminder at your night time' : 'Check-in reminder off'); }
+  else if(t.id==='setPlanNotif'){ db.settings.planNotifs = t.checked; save(); if(t.checked) askNotifPermission(); }
+  else if(t.id==='setLead'){ const n = parseInt(t.value,10); if(n>=0 && n<=120){ db.settings.leadDays = n; save(); } else t.value = leadDays(); }
+  else if(t.id==='setCur'){ const v = t.value.trim().slice(0, 4); db.settings.currency = v || '$'; t.value = db.settings.currency; save(); }
 });
 document.addEventListener('click', e=>{ if(e.target && e.target.matches && e.target.matches('input[type=file]')) suppressLockOnce(); }, true);
 /* Tapping a set or template number selects what's there, so typing replaces it. The tap's own
@@ -2639,10 +3490,16 @@ document.addEventListener('mouseup', e=>{
 document.addEventListener('focusin', e=>{
   const el = e.target;
   if(el && el.matches && el.matches('input:not([type=checkbox]):not([type=file]), textarea, select')){
-    setTimeout(()=>{ try{ el.scrollIntoView({block:'center', behavior:'smooth'}); }catch(x){} }, 350);
+    setTimeout(()=>{ if(document.activeElement===el){ try{ el.scrollIntoView({block:'center', behavior:'smooth'}); }catch(x){} } }, 350);
   }
 });
-document.addEventListener('keydown', e=>{ if(e.key==='Escape' && sheetOpen) closeSheet(); });
+document.addEventListener('keydown', e=>{
+  if(e.key==='Escape' && sheetOpen) closeSheet();
+  // tappable rows act like buttons for keyboards and switch access
+  if((e.key==='Enter' || e.key===' ') && e.target && e.target.matches && e.target.matches('.tap-row[role=button]')){ e.preventDefault(); e.target.click(); }
+});
+/* Rows built as <div class="tap-row" data-action> are announced and focusable as buttons. */
+function markTapRows(root){ root.querySelectorAll('div.tap-row[data-action]:not([role])').forEach(el=>{ el.setAttribute('role','button'); el.tabIndex = 0; }); }
 ['pointermove','pointerdown'].forEach(ev=>document.addEventListener(ev, e=>{ if(e.target && e.target.id==='levels') chartHover(e); }));
 document.addEventListener('pointerleave', e=>{ if(e.target && e.target.id==='levels') { const t=$('#chartTip'); if(t) t.hidden=true; } }, true);
 let resizeT; window.addEventListener('resize', ()=>{ clearTimeout(resizeT); resizeT = setTimeout(drawLevels, 120); });
@@ -2677,6 +3534,7 @@ function initNative(){
   }
   if(LN){
     
+    LN.createChannel && LN.createChannel({id:'planner', name:'Stock and planning', description:'Reorder, expiring vials, blood tests and the daily check-in', importance:3, visibility:0}).catch(()=>{});
     LN.createChannel && LN.createChannel({id:'doses', name:'Dose reminders', description:'Reminders on scheduled injection days', importance:4, visibility:0, vibration:true}).catch(()=>{});
     LN.registerActionTypes && LN.registerActionTypes({types:[{id:'DOSE', actions:[
       {id:'log', title:'Log now', foreground:true},
@@ -2690,7 +3548,7 @@ function initNative(){
 let lastDayKey = ymd(new Date());
 setInterval(()=>{
   const k = ymd(new Date());
-  if(k !== lastDayKey){ lastDayKey = k; if(!sheetOpen) render(); scheduleReminders(); }
+  if(k !== lastDayKey){ lastDayKey = k; if(!sheetOpen) render(); else closeSheet.stale = true; scheduleReminders(); }   // a new day: redraw now, or when the open sheet closes
 }, 60000);
 
 /* ================= Boot ================= */
@@ -2715,6 +3573,7 @@ load().then(async ()=>{
   
   applySecureScreen();
   setTimeout(cleanShareCache, 5000);
+  webInit();
   if(lockOn()){
     showLock();
     setTimeout(unlock, 250);
@@ -2734,6 +3593,7 @@ load().then(async ()=>{
 });
 
 // expose for debugging in dev tools
-window.__injtrack = { get db(){ return db; }, cycleState, addDays, ymd, gdBackup, timeline, statusFor, occurrences, handleNotificationAction, quickLog, buildReport, loadJsPdf, reportData,
+// test hook: only in development builds (build-info.js says version "dev"), never in a release
+if(BUILD.version === 'dev') window.__injtrack = { get db(){ return db; }, cycleState, addDays, ymd, gdBackup, timeline, statusFor, occurrences, handleNotificationAction, quickLog, buildReport, loadJsPdf, reportData,
    };
 })();

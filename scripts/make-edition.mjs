@@ -1,7 +1,9 @@
 // Makes the free or premium edition of the app from the one source.
 //
-//   node scripts/make-edition.mjs web <free|premium> <src www> <out dir> [--version 1.2.3] [--site https://…] [--keys '{"k1":"…"}']
+//   node scripts/make-edition.mjs web <free|premium> <src www> <out dir> [--version 1.2.3] [--site https://…] [--keys '{"k1":"…"}'] [--platform web]
 //       copies the web app to <out dir>, keeps or removes the premium code, writes build-info.js
+//       --platform web: the installable web app for iPhone and browsers (manifest, offline service worker,
+//       Home Screen icons, hosting headers); the app hides what only works on Android
 //   node scripts/make-edition.mjs android <free|premium>
 //       puts the right native plugins, MainActivity and AndroidManifest into android/ (run after `cap add android`)
 //   node scripts/make-edition.mjs check
@@ -12,6 +14,7 @@
 //   /*<premium>*/ … /*</premium>*/   training, labs and health: removed from the free edition
 //   /*<free> … </free>*/              free-only code, written as a comment so the plain source runs as premium
 import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, rmSync, readdirSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
@@ -66,7 +69,7 @@ function makeWeb(edition, src, out, opts) {
   const js = transformJs(readFileSync(join(src, 'app.js'), 'utf8'), edition);
   syntaxCheck(js, `${edition}/app.js`);
   writeFileSync(join(out, 'app.js'), js);
-  const info = { version: opts.version || 'dev', edition, siteUrl: opts.site || '' };
+  const info = { version: opts.version || 'dev', edition, siteUrl: opts.site || '', ...(opts.platform === 'web' ? { platform: 'web' } : {}) };
   if (edition === 'premium' && opts.keys) info.licenceKeys = JSON.parse(opts.keys);
   writeFileSync(join(out, 'build-info.js'), `window.ETS_BUILD = ${JSON.stringify(info)};\n`);
   // the premium app talks to the licence server: allow it in the page's security policy
@@ -74,22 +77,100 @@ function makeWeb(edition, src, out, opts) {
     const ip = join(out, 'index.html');
     writeFileSync(ip, readFileSync(ip, 'utf8').replace("connect-src 'self'", `connect-src 'self' ${info.siteUrl}`));
   }
-  console.log(`web: ${edition} edition ${info.version} -> ${out}`);
+  if (opts.platform === 'web') makePwa(out, info);
+  console.log(`web: ${edition} edition ${info.version}${opts.platform === 'web' ? ' (web app)' : ''} -> ${out}`);
 }
 
-const PREMIUM_PLUGINS = ['HealthDataPlugin', 'HeartRatePlugin', 'TrackerPlugin'];
+/* The installable web app: manifest, icons, iPhone Home Screen tags, an offline service worker, hosting headers. */
+function makePwa(out, info) {
+  const icons = join(ROOT, 'web-extras', 'icons');
+  if (!existsSync(icons)) throw new Error('web-extras/icons is missing');
+  cpSync(icons, join(out, 'icons'), { recursive: true });
+  // Android-only helpers aren't needed on the web (Leaflet stays: it shows routes recorded on a phone)
+  writeFileSync(join(out, 'manifest.webmanifest'), JSON.stringify({
+    id: './', name: 'Enhanced Training Studio', short_name: 'ETS', description: 'Injection tracker and training log for enhanced lifters.',
+    start_url: './', scope: './', display: 'standalone', orientation: 'portrait', background_color: '#F2F1EC', theme_color: '#1A1C1E',
+    icons: [
+      { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+      { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' },
+      { src: 'icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+    ],
+  }, null, 2));
+  const ip = join(out, 'index.html');
+  let html = readFileSync(ip, 'utf8');
+  // no Capacitor bridge on the web, so no inline scripts are needed at all
+  html = html.replace("script-src 'self' 'unsafe-inline'", "script-src 'self'");
+  const csp = (html.match(/http-equiv="Content-Security-Policy" content="([^"]*)"/) || [])[1] || '';
+  if (!csp || /unsafe-inline/.test(csp.match(/script-src[^;]*/)?.[0] || 'unsafe-inline')) throw new Error('web build: could not remove unsafe-inline from the CSP');
+  html = html.replace('<title>', `<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="ETS">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="referrer" content="no-referrer">
+<title>`);
+  writeFileSync(ip, html);
+  // Cloudflare Pages headers: the service worker must always be fetched fresh; lock down everything else
+  writeFileSync(join(out, '_headers'), `/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), bluetooth=()
+  Strict-Transport-Security: max-age=31536000
+/sw.js
+  Cache-Control: no-cache
+/manifest.webmanifest
+  Cache-Control: no-cache
+/index.html
+  Cache-Control: no-cache
+/
+  Cache-Control: no-cache
+`);
+  // offline: cache every file of this version; a new version installs in the background and the app offers a reload
+  const files = [];
+  (function walk(rel) {
+    for (const f of readdirSync(join(out, rel))) {
+      const r = rel ? `${rel}/${f}` : f;
+      if (statSync(join(out, r)).isDirectory()) walk(r);
+      else if (!['_headers', 'sw.js'].includes(r) && !/\.map$/.test(r)) files.push(r);
+    }
+  })('');
+  files.sort();
+  const h = createHash('sha256'); for (const f of files) { h.update(f); h.update(readFileSync(join(out, f))); }
+  const cache = `ets-web-${info.version}-${h.digest('hex').slice(0, 10)}`;
+  writeFileSync(join(out, 'sw.js'), `/* Offline support for the Enhanced Training Studio web app. Written by the build. */
+const CACHE = ${JSON.stringify(cache)};
+const FILES = ${JSON.stringify(['./', ...files])};
+self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES))); });
+self.addEventListener('activate', e => {
+  e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('ets-web-') && k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
+});
+self.addEventListener('message', e => { if (e.data === 'skipWaiting') self.skipWaiting(); });
+self.addEventListener('fetch', e => {
+  const req = e.request, url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== location.origin) return;       // the licence server and map tiles go straight to the network
+  e.respondWith(caches.open(CACHE).then(c => c.match(req, { ignoreSearch: true }).then(hit => hit ||
+    fetch(req).catch(() => req.mode === 'navigate' ? c.match('./') : Response.error()))));
+});
+`);
+}
+
+const PREMIUM_PLUGINS = ['HealthDataPlugin', 'HeartRatePlugin', 'TrackerPlugin', 'AppUpdatePlugin'];
 export function freeManifest(xml) {
   const drop = [
     /\s*<intent-filter>\s*<action android:name="androidx\.health\.ACTION_SHOW_PERMISSIONS_RATIONALE"\s*\/>\s*<\/intent-filter>/g,
     /\s*<activity-alias[\s\S]*?<\/activity-alias>/g,
     /\s*<service\s+android:name="\.(HrService|TrackService)"[\s\S]*?\/>/g,
-    /\s*<!-- (Live heart rate|GPS routes|Health Connect)[^>]*-->/g,
+    /\s*<!-- (Live heart rate|GPS routes|Health Connect|In-app updates)[^>]*-->/g,
+    /\s*<uses-permission android:name="android\.permission\.REQUEST_INSTALL_PACKAGES"[^>]*\/>/g,
     /\s*<uses-feature android:name="android\.hardware\.(bluetooth_le|location\.gps)"[^>]*\/>/g,
     /\s*<uses-permission android:name="android\.permission\.(BLUETOOTH\w*|ACCESS_(FINE|COARSE)_LOCATION|FOREGROUND_SERVICE\w*|health\.\w+)"[^>]*\/>/g,
     /\s*<queries>[\s\S]*?<\/queries>/g,
   ];
   for (const re of drop) xml = xml.replace(re, '');
-  if (/health|BLUETOOTH|LOCATION|HrService|TrackService/.test(xml)) throw new Error('free manifest still mentions a premium permission or service');
+  if (/health|BLUETOOTH|LOCATION|HrService|TrackService|INSTALL_PACKAGES/.test(xml)) throw new Error('free manifest still mentions a premium permission or service');
   return xml;
 }
 function makeAndroid(edition) {
@@ -125,7 +206,7 @@ function check() {
   const bad = danglingInFree(src).filter(n => !LOCAL_NAMES.has(n));
   if (bad.length) throw new Error('The free edition refers to premium-only code: ' + bad.join(', '));
   const free = transformJs(src, 'free');
-  for (const w of ['renderLabs', 'openLabPdfImport', 'renderWorkoutTab', 'healthSync', 'licActivate', 'edVerifyJs']) if (free.includes(w)) throw new Error(`free edition still contains ${w}`);
+  for (const w of ['renderLabs', 'openLabPdfImport', 'renderWorkoutTab', 'healthSync', 'licActivate', 'edVerifyJs', 'updDownload']) if (free.includes(w)) throw new Error(`free edition still contains ${w}`);
   const man = join(ROOT, 'android-extras', 'AndroidManifest.premium.xml');
   if (existsSync(man)) freeManifest(readFileSync(man, 'utf8'));
   console.log(`check: both editions OK (free app.js ${Math.round(free.length / 1024)} KB, premium ${Math.round(transformJs(src, 'premium').length / 1024)} KB)`);
@@ -143,7 +224,9 @@ if (isMain) {
       const cfgPath = flag('--config') || join(ROOT, '..', 'ets-web', 'site', 'config.json');
       const cfg = existsSync(cfgPath) ? JSON.parse(readFileSync(cfgPath, 'utf8')) : {};
       const keys = flag('--keys') || (cfg.licenceKeys && Object.keys(cfg.licenceKeys).length ? JSON.stringify(cfg.licenceKeys) : undefined);
-      makeWeb(edition, src, out, { version: flag('--version'), site: flag('--site') ?? cfg.siteUrl, keys });
+      const platform = flag('--platform');
+      if (platform && platform !== 'web') throw new Error('--platform can only be "web"');
+      makeWeb(edition, src, out, { version: flag('--version'), site: flag('--site') ?? cfg.siteUrl, keys, platform });
     } else if (cmd === 'android') {
       if (!['free', 'premium'].includes(rest[0])) throw new Error('usage: android <free|premium>');
       makeAndroid(rest[0]);
