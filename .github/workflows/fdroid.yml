@@ -41,6 +41,9 @@ concurrency:
 env:
   API: https://enhancedtraining.app
   PAGES: https://ets-public.github.io/ets-public
+  # the app's two signing certificates (SHA-256): the original key and the key it rotated to (see ets_fdroid.py)
+  ETS_SIGNER_ORIGINAL: 25f0849e726b83994dd583ca85bbd168051cccd63406bb509e4012ce25a92629
+  ETS_SIGNER_ROTATED: 390881b38ed3bb2196e9392c73edb990265ba6a96491b18c6893f63a931af7db
 
 jobs:
   build:
@@ -50,7 +53,7 @@ jobs:
     outputs:
       publish: ${{ steps.check.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check the secrets are set
         env:
@@ -96,7 +99,9 @@ jobs:
           FDROID_LICENCE_KEY: ${{ secrets.FDROID_LICENCE_KEY }}
         run: |
           mkdir -p fdroid/repo
-          jq -n --arg key "$FDROID_LICENCE_KEY" '{key: $key}' |
+          # a secret pasted into GitHub can pick up a line break at the end: drop it
+          key=$(printf '%s' "$FDROID_LICENCE_KEY" | tr -d '\r\n')
+          jq -n --arg key "$key" '{key: $key}' |
             curl -fsS --retry 3 -X POST -H 'content-type: application/json' --data @- "$API/api/download" -o link.json
           url=$(jq -r .url link.json); sha=$(jq -r .sha256 link.json); v=$(jq -r .version link.json)
           rm -f link.json
@@ -109,7 +114,7 @@ jobs:
           echo "$v" > version.txt
           ls -l fdroid/repo
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         if: steps.check.outputs.publish == 'true'
         with:
           python-version: '3.12'
@@ -127,10 +132,24 @@ jobs:
           FDROID_KEYSTORE_PASS: ${{ secrets.FDROID_KEYSTORE_PASS }}
         run: |
           umask 077
-          printf '%s' "$FDROID_KEYSTORE" | base64 -d > keystore.p12
+          # a secret pasted into GitHub can pick up a line break at the end: drop it
+          export FDROID_KEYSTORE_PASS="$(printf '%s' "$FDROID_KEYSTORE_PASS" | tr -d '\r\n')"
+          printf '%s' "$FDROID_KEYSTORE" | tr -d '\r\n ' | base64 -d > keystore.p12
+          # say plainly if the key and its password don't go together (keytool's message has no secrets in it)
+          if ! keytool -list -keystore keystore.p12 -storetype PKCS12 -alias repokey -storepass:env FDROID_KEYSTORE_PASS > keytool.txt 2>&1; then
+            echo "::error::The repository key (FDROID_KEYSTORE) didn't open with its password (FDROID_KEYSTORE_PASS): $(grep -v '^$' keytool.txt | tail -1). Set both secrets again from ETS-MENU (option F)."
+            rm -f keystore.p12 keytool.txt; exit 1
+          fi
+          rm -f keytool.txt
           chmod 600 config.yml
-          mkdir -p repo/icons && cp -n icon.png repo/icons/icon.png
-          fdroid update --verbose
+          mkdir -p repo/icons
+          [ -f repo/icons/icon.png ] || cp icon.png repo/icons/icon.png
+          # fdroid, accepting the app's signing key rotation (see ets_fdroid.py)
+          python ets_fdroid.py update --verbose
+          # the app must be in the index: stop here rather than publish an empty repository
+          if ! grep -q '"com\.' repo/index-v1.json 2>/dev/null && ! grep -q '"packages": *{ *"' repo/index-v2.json 2>/dev/null; then
+            echo "::error::No app ended up in the repository index (see the fdroid messages above)."; exit 1
+          fi
           # the repository's fingerprint, for the landing page
           keytool -list -v -keystore keystore.p12 -storepass:env FDROID_KEYSTORE_PASS -alias repokey |
             sed -n 's/^.*SHA256: *//p' | head -1 | tr -d ':' > ../fingerprint.txt
