@@ -1,0 +1,4 @@
+• Half-lives of common compounds and peptides are suggested as you type a name, with a list to pick from, and filled in for compounds you already have
+• Lab test results: enter a batch's tested strength and the app changes how much you draw so your dose stays the same, and corrects doses already logged from that vial
+• New injection sites: lats, and upper and lower ventrogluteal
+• Tablet mode: on tablets, unfolded foldables and phones turned sideways, the tabs move to a rail down the left,…

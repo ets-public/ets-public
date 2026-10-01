@@ -1,6 +1,6 @@
 # Enhanced Training Studio · free edition
 
-Version **1.0.4** · 1 Oct 2026
+Version **1.0.4** · 2 Oct 2026
 
 A free Android app for your injection protocol. Everything stays on your phone.
 

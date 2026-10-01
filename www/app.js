@@ -19,9 +19,56 @@ const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const DOW_ORDER = [1,2,3,4,5,6,0]; // Monday first
 const BARRELS = ['0.3 mL','0.5 mL','1 mL','3 mL','5 mL'];
 const SITES = {
-  IM:   ['Glute L','Glute R','Ventroglute L','Ventroglute R','Delt L','Delt R','Quad L','Quad R'],
+  IM:   ['Glute L','Glute R','Ventroglute upper L','Ventroglute upper R','Ventroglute lower L','Ventroglute lower R','Delt L','Delt R','Lat L','Lat R','Quad L','Quad R'],
   SubQ: ['Abdomen L','Abdomen R','Love handle L','Love handle R','Thigh L','Thigh R']
 };
+/* Published elimination half-lives (days) for common compounds: [name, days, as published, other names]. Estimates
+   from studies and product information (most via Wikipedia's pharmacology tables; hCG and somatropin from their
+   prescribing information; retatrutide from its phase 1 studies, cagrilintide from its phase 1b study in The Lancet,
+   2021); real levels vary from person to person. Only compounds with a published human figure are listed. */
+const HALF_LIVES = [
+  ['Testosterone cypionate', 8, '7–8 days', ['test cyp','test c','testosterone cyp','depo-testosterone','depo testosterone','cypionate testosterone']],
+  ['Testosterone enanthate', 4.5, '4–5 days', ['test e','test enanthate','testosterone enan','xyosted']],
+  ['Testosterone propionate', 0.8, 'about 20 hours', ['test p','test prop','testosterone prop']],
+  ['Testosterone undecanoate (injection)', 34, 'about 34 days (in castor oil)', ['nebido','aveed','test u inj','tu injection']],
+  ['Nandrolone decanoate', 9, '6–12 days', ['deca','deca-durabolin','deca durabolin','nandrolone deca']],
+  ['Nandrolone phenylpropionate', 2.7, 'about 2.7 days', ['npp','nandrolone pp','durabolin']],
+  ['Trenbolone acetate', 3, 'about 3 days', ['tren a','tren ace','tren acetate']],
+  ['Drostanolone propionate', 2, 'about 2 days', ['masteron p','masteron prop','masteron propionate','mast p','mast prop','drostanolone prop']],
+  ['Boldenone undecylenate', 14, 'about 14 days', ['eq','equipoise','boldenone']],
+  ['Metenolone enanthate', 10.5, 'about 10.5 days', ['primobolan depot','primo e','primo enanthate','methenolone enanthate']],
+  ['Stanozolol (oral)', 0.375, 'about 9 hours', ['winstrol','winny','stanozolol','winstrol oral']],
+  ['Stanozolol (injection)', 1, 'about 24 hours', ['winstrol depot','winny inj','stanozolol injection']],
+  ['Oxandrolone', 0.4, '9–10 hours', ['anavar','var']],
+  ['Metandienone', 0.19, '3–6 hours', ['dianabol','dbol','methandrostenolone','methandienone']],
+  ['hCG (chorionic gonadotropin)', 1.2, '23–33 hours', ['hcg','pregnyl','novarel','ovidrel','chorionic gonadotropin']],
+  ['Anastrozole', 1.9, '40–50 hours', ['arimidex','adex']],
+  ['Letrozole', 2, 'about 2 days', ['femara','letro']],
+  ['Exemestane', 1, 'about 24 hours', ['aromasin']],
+  ['Tamoxifen', 6, '5–7 days', ['nolvadex','nolva']],
+  ['Clomifene', 5.5, '4–7 days', ['clomid','clomiphene']],
+  ['Cabergoline', 2.75, '63–69 hours', ['dostinex','caber']],
+  ['Semaglutide', 7, 'about 7 days', ['ozempic','wegovy','sema','rybelsus']],
+  ['Tirzepatide', 5, 'about 5 days', ['mounjaro','zepbound','tirz']],
+  ['Retatrutide', 6, 'about 6 days', ['reta','ly3437943']],
+  ['Cagrilintide', 7.4, '159–195 hours (7–8 days)', ['cagri']],
+  ['Liraglutide', 0.54, 'about 13 hours', ['saxenda','victoza','lira']],
+  ['CJC-1295 with DAC', 7, '6–8 days', ['cjc 1295 dac','cjc 1295 with dac','cjc dac']],
+  ['Ipamorelin', 0.083, 'about 2 hours', ['ipam']],
+  ['Tesamorelin', 0.022, '26–38 minutes', ['egrifta','tesa']],
+  ['Bremelanotide (PT-141)', 0.11, 'about 2.7 hours', ['pt 141','pt141','vyleesi']],
+  ['Somatropin (growth hormone)', 0.35, '7–10 hours (under the skin)', ['hgh','gh','growth hormone','norditropin','genotropin','omnitrope','humatrope','saizen']],
+  ['Mecasermin (IGF-1)', 0.24, 'about 5.8 hours', ['increlex']],
+];
+let hlFilled = [];        // names of compounds that just got a published half-life (said once after start-up)
+/* the listed compound a name refers to: the longest name or other name that appears in it as whole words */
+function halfLifeFor(name){
+  const n = ' ' + String(name||'').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
+  if(n.trim().length < 2) return null;
+  let best = null, len = 0;
+  HALF_LIVES.forEach(h=>{ [h[0], ...h[3]].forEach(a=>{ const k = ' ' + a.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' '; if(k.length > len && n.includes(k)){ best = h; len = k.length; } }); });
+  return best;
+}
 const LAB_PRESETS = [
   ['Total testosterone','nmol/L'],['Free testosterone','pmol/L'],['Oestradiol (E2)','pmol/L'],
   ['Haematocrit','%'],['Haemoglobin','g/L'],['SHBG','nmol/L'],['PSA','µg/L'],
@@ -31,7 +78,7 @@ const STORE_KEY = 'inj-data-v2';
 
 /* ================= State ================= */
 let db = { compounds:[], logs:[], labs:[], checkins:[], programmes:[], measures:[], health:{days:{}}, exercises:[], templates:[], workouts:[], activeWorkout:null, settings:{} };
-const DEFAULT_SETTINGS = { reminders:false, morning:'08:00', night:'21:00', lowStockDoses:3, leadDays:14, currency:'$', autoBackup:true, lastBackupAt:null, lastBackupFile:null, lastBackupError:null, lockEnabled:false, lockAfter:0, privateNotifs:true, secureScreen:false };
+const DEFAULT_SETTINGS = { reminders:false, morning:'08:00', night:'21:00', lowStockDoses:3, leadDays:14, currency:'$', autoBackup:true, lastBackupAt:null, lastBackupFile:null, lastBackupError:null, lockEnabled:false, lockAfter:0, privateNotifs:true, secureScreen:false, launcherShare:false, launcherNames:false };
 const ui = {
   tab:'today', mode:'inj', lastTab:{inj:'today', train:'workout', health:'hoverview'}, hMetric:null, hRange:30, histFilter:'all', calMonth:null, calSel:null, draft:null, tplEdit:null,
   chartCompound:null, chartWeeks:4
@@ -178,10 +225,43 @@ let _setsCache = null;   // training sets index; cleared by save(), rebuilt when
 function save(){
   _setsCache = null; _tlCache.clear(); _loadMap = null; _logIdx = null; _labTestsCache = null;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(()=>{ rawSet(STORE_KEY, JSON.stringify(db)); scheduleReminders(); scheduleAutoBackup(); }, 120);
+  saveTimer = setTimeout(()=>{ rawSet(STORE_KEY, JSON.stringify(db)); scheduleReminders(); scheduleAutoBackup(); launcherPublish(); }, 120);
 }
 /* write without triggering reminders/backup again (used by the backup itself) */
 function persistQuiet(){ rawSet(STORE_KEY, JSON.stringify(db)); }
+
+/* ================= Home-screen launcher bridge ================= */
+/* The companion launcher shows a "today" card from this summary. Native side: LauncherSummaryProvider reads it
+   from Capacitor Preferences and only hands it to apps the user has allowed (READ_LAUNCHER_SUMMARY, a runtime
+   permission). Off until turned on in Setup > App settings; compound names are left out unless that's on too. */
+const LAUNCHER_KEY = 'ets-launcher-summary';
+let lastLauncherSig = null;
+function launcherSummary(){
+  const s = db.settings, today = dayStart(new Date()), names = !!s.launcherNames;
+  const doses = db.compounds.filter(c=>!c.archived && hasSchedule(c)).map(c=>{
+    const st = statusFor(c);
+    // open doses: missed in the last week, due today, planned for the next 3 weeks (taken/skipped ones are left out,
+    // so the launcher can tell what is still to do even if this app isn't opened again for a while)
+    const open = st.paused || st.finished ? [] : timeline(c, addDays(today, -7), addDays(today, 21))
+      .filter(t=>t.status==='missed' || t.status==='due' || t.status==='planned').slice(0, 12)
+      .map(t=>({d: ymd(t.day), s: t.slot===0 || t.slot===1 ? t.slot : null}));
+    return {id: c.id, name: names ? c.name : null, supp: !!c.supplement, time: c.time==='night' ? 'night' : 'morning',
+      paused: !!st.paused, open};
+  });
+  let training = null;
+  
+  return {v: 1, app: 'ETS', edition: EDITION === 'free' ? 'free' : 'premium', updatedAt: new Date().toISOString(),
+    names, morning: s.morning, night: s.night, doses, training};
+}
+function launcherPublish(){
+  if(!isNative || webApp()) return;
+  let json = '';
+  if(db.settings.launcherShare){ try{ json = JSON.stringify(launcherSummary()); }catch(e){ return; } }
+  const sig = json.replace(/"updatedAt":"[^"]*",?/, '');     // only write when something actually changed
+  if(sig === lastLauncherSig) return;
+  lastLauncherSig = sig;
+  rawSet(LAUNCHER_KEY, json);
+}
 
 async function load(){
   let raw = await rawGet(STORE_KEY);
@@ -248,6 +328,14 @@ function migrate(){
       c.createdAt = new Date(Math.min(first || now, now)).toISOString();
     }
     if(c.halfLife!==undefined && !(c.halfLife>0)) c.halfLife = null;
+    // compounds saved without a half-life get the published figure for their name, once (if you clear it later,
+    // it stays cleared)
+    if(c.hlChecked !== true){
+      c.hlChecked = true;
+      if(!(c.halfLife > 0)){ const h = halfLifeFor(c.name); if(h){ c.halfLife = h[1]; hlFilled.push(c.name); } }
+    }
+    // 1.0.4 split the ventrogluteal site into upper and lower
+    if(Array.isArray(c.sites)) c.sites = [...new Set(c.sites.flatMap(x=>/^Ventroglute [LR]$/.test(x) ? [`Ventroglute upper ${x.slice(-1)}`, `Ventroglute lower ${x.slice(-1)}`] : [x]))];
     if(!Array.isArray(c.pauses)) c.pauses = [];
     if(!Array.isArray(c.doseHistory)) c.doseHistory = c.dosePerInj>0 ? [{from: ymd(c.createdAt), dose: c.dosePerInj}] : [];
     normaliseCompound(c);
@@ -255,7 +343,8 @@ function migrate(){
   db.logs.forEach(l=>{
     if(l.unit!=null) l.unit = okUnit(l.unit);
     if(l.piece!=null && !Object.prototype.hasOwnProperty.call(PIECES, l.piece)) delete l.piece;
-    if(l.slot!==0 && l.slot!==1) delete l.slot;      // twice-daily: logged from the morning (0) or night (1) reminder
+    if(l.slot!==0 && l.slot!==1) delete l.slot;
+    if(l.labFix!=null && !(isObj(l.labFix) && +l.labFix.dose >= 0 && +l.labFix.strength > 0)) delete l.labFix;   // the dose as first logged, before a lab test corrected it      // twice-daily: logged from the morning (0) or night (1) reminder
     if(l.compoundName!=null) l.compoundName = String(l.compoundName).slice(0, 80);
     const c = db.compounds.find(c=>c.id===l.compoundId);
     if(c){
@@ -324,7 +413,8 @@ function normaliseCompound(c){
       id: typeof x.id==='string' && /^[\w-]{1,40}$/.test(x.id) ? x.id : uid(),
       count: Math.min(999, Math.max(0, Math.round(+x.count) || 0)),
       sizeMl: pos(x.sizeMl, 10000), strength: pos(x.strength, 100000), powderMg: pos(x.powderMg, 1000000),
-      price: pos(x.price, 1000000), expiry: okYmd(x.expiry) ? x.expiry : null, batch: typeof x.batch==='string' ? x.batch.trim().slice(0, 40) : ''
+      price: pos(x.price, 1000000), expiry: okYmd(x.expiry) ? x.expiry : null, batch: typeof x.batch==='string' ? x.batch.trim().slice(0, 40) : '',
+      ...(cleanTested(x.tested) ? {tested: cleanTested(x.tested)} : {})
     })).filter(x=>x.powderMg || (x.sizeMl && x.strength)).slice(0, 20);
     if(!c.stock.length) delete c.stock;
   }
@@ -333,9 +423,16 @@ function normaliseCompound(c){
     if(v.price!=null && !(+v.price>0 && +v.price<=1000000)) delete v.price;
     if(v.expiry!=null && !okYmd(v.expiry)) delete v.expiry;
     if(v.batch!=null) v.batch = String(v.batch).trim().slice(0, 40);
+    if(v.tested!=null){ const t = cleanTested(v.tested); if(t) v.tested = t; else delete v.tested; }
   } else if(c.vial!=null) c.vial = null;
   if(c.orderedAt!=null && !okYmd(c.orderedAt)) delete c.orderedAt;
   if(c.stockOnly !== true) delete c.stockOnly;
+}
+/* A lab test result on a vial or a sealed line: {label: the label strength (mg/mL, mg per tablet, or mg of powder
+   in the vial), at: day tested, note}. The tested amount itself is the vial's strength (or powder) from then on. */
+function cleanTested(t){
+  if(!isObj(t) || !(+t.label > 0 && +t.label <= 1000000)) return null;
+  return {label: +t.label, at: okYmd(t.at) ? t.at : null, note: typeof t.note==='string' ? t.note.slice(0, 80) : ''};
 }
 /* The vial as entered in the compound sheet. Its "opened" time is the baseline for stock: logs before it don't touch
    the amount left. Saving without changing the vial keeps that time; entering a new amount starts it now. */
@@ -346,7 +443,7 @@ function vialFromSheet(ex, sizeMl, remain){
   if(same) return {...old};                                          // untouched: keep it exactly (with or without an opened time)
   const v = {sizeMl, remainingMl, openedAt: new Date().toISOString()};
   // the same vial with its amount corrected keeps its price, expiry and batch
-  if(old && Math.abs((+old.sizeMl||0) - sizeMl) < 1e-9) ['price','expiry','batch'].forEach(k=>{ if(old[k]!=null && old[k]!=='') v[k] = old[k]; });
+  if(old && Math.abs((+old.sizeMl||0) - sizeMl) < 1e-9) ['price','expiry','batch','tested'].forEach(k=>{ if(old[k]!=null && old[k]!=='') v[k] = old[k]; });
   return v;
 }
 /* where the current cycle is today: {state:'before'|'active'|'done', week, weeks, day, days, start, end, lastDay} */
@@ -827,6 +924,8 @@ function setMode(m){
   render();
    $('#main').scrollTop = 0;
 }
+const TWO_COL_TABS = new Set(['today','stock','labs','setup','app','workout','records','templates','hoverview','htrends','hweek','hbody']);
+function curWkSafe(){ try{ return  null; }catch(e){ return null; } }
 const PLUS = '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>';
 
 function render(){
@@ -877,8 +976,13 @@ function render(){
   }
   
   html = webUpdateBannerHtml() + html;
+  // tablet mode: screens made of separate cards can sit in two columns when the screen is wide enough (styles.css);
+  // lists read in date order (History) and step-by-step screens (a running workout, the calendar) stay in one
+  const live = (ui.tab==='workout' && (curWkSafe() || db.activeActivity)) || (ui.tab==='templates' && ui.tplEdit);
+  $('#main').dataset.cols = !live && TWO_COL_TABS.has(ui.tab) ? '2' : '1';
   $('#main').innerHTML = html;
   markTapRows($('#main'));
+  markColumns($('#main'));
   
   fitTabLabels();
   if(ui.tab==='today') drawLevels();
@@ -999,7 +1103,7 @@ function renderToday(){
         <div><span>${oral ? 'When' : 'Site'}</span><span>${oral ? (perDay(c)===2 ? 'AM + PM' : c.time==='night' ? 'Night' : 'Morning') : esc(site)}</span></div>
       </div>
       <div class="dose-foot">
-        <span class="vial-line ${stock&&stock.low?'low':''}">${stock ? `${cap1(contW(c))} ${round(stock.rem,2)} / ${round(c.vial.sizeMl,2)} ${esc(volUnit(c, 2))}${stock.dosesLeft!==null?` · ≈${stock.dosesLeft} doses`:''}${stockTracked(c)?` · +${sealedCount(c)} sealed`:''}` : (oral ? '' : pv ? `${round(pv,2)} mL${c.barrel?' · '+esc(c.barrel)+' syringe':''}` : '')}</span>
+        <span class="vial-line ${stock&&stock.low?'low':''}">${stock ? `${cap1(contW(c))} ${round(stock.rem,2)} / ${round(c.vial.sizeMl,2)} ${esc(volUnit(c, 2))}${stock.dosesLeft!==null?` · ≈${stock.dosesLeft} doses`:''}${stockTracked(c)?` · +${sealedCount(c)} sealed`:''}${labTested(c) ? ' · lab-tested' : ''}` : (oral ? '' : pv ? `${round(pv,2)} mL${c.barrel?' · '+esc(c.barrel)+' syringe':''}` : '')}</span>
         <div class="foot-btns">${st.waitNight ? `<span class="small muted">Tonight's dose later</span>` : `<button class="btn btn-outline" data-action="skip" data-id="${esc(c.id)}">Skip</button><button class="btn" data-action="log" data-id="${esc(c.id)}">Log dose</button>`}</div>
       </div>
     </div>`;
@@ -1351,7 +1455,7 @@ function renderHistory(){
     const vt = logVolText(l, c);
     html += `<div class="list-item tap-row" data-action="log-edit" data-id="${esc(l.id)}">
       <div class="list-main"><div class="list-title">${esc(c ? c.name : (l.compoundName || 'Removed compound'))}</div>
-        <div class="list-sub mono">${fmtTime(l.date)}${vt?` · ${esc(vt)}`:''}${l.site?' · '+esc(l.site):''}</div>
+        <div class="list-sub mono">${fmtTime(l.date)}${vt?` · ${esc(vt)}`:''}${l.site?' · '+esc(l.site):''}${l.labFix ? ` · <span class="lab-tag">lab-corrected (logged as ${esc(fmtAmt(l.labFix.dose, l.unit))})</span>` : ''}</div>
         ${l.notes?`<div class="list-note">${esc(l.notes)}</div>`:''}
       </div>
       <div class="list-right">${l.skipped ? '<span class="tag tag-muted">Skipped</span>' : `<div class="big">${fmtAmt(l.dose, l.unit || (c&&c.unit))}</div>`}</div>
@@ -1442,7 +1546,7 @@ function renderSetup(){
     const stock = stockInfo(c);
     html += `<div class="list-item tap-row" data-action="compound-edit" data-id="${esc(c.id)}">
       <div class="list-main"><div class="list-title">${esc(c.name)}</div>
-      <div class="list-sub">${esc(strengthText(c))}${c.form==='powder'?' (reconstituted)':''} · ${isOral(c) ? (c.supplement ? 'Supplement' : 'Oral') : c.route} · ${esc(scheduleLabel(c))}</div>
+      <div class="list-sub">${esc(strengthText(c))}${c.form==='powder'?' (reconstituted)':''}${labTested(c) ? ' · lab-tested' : ''} · ${isOral(c) ? (c.supplement ? 'Supplement' : 'Oral') : c.route} · ${esc(scheduleLabel(c))}</div>
       <div class="list-sub">${currentPause(c)?'<b>Paused</b> · ':''}${c.dosePerInj?fmtAmt(c.dosePerInj,c.unit)+(isOral(c) ? ' per dose' : ' per injection'):'No planned dose'}${doseChangeNote(c)}${cycleNote(c)}${stock?` · ${round(stock.rem,2)}/${round(c.vial.sizeMl,2)} ${esc(volUnit(c,2))} in ${contW(c)}`:''}${c.halfLife?` · t½ ${c.halfLife}d`:''}</div></div>
       <svg class="chev" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
     </div>`;
@@ -1648,6 +1752,13 @@ function renderAppSettings(){
 
   </div>`;
 
+  if(isNative && !webApp()) html += `<div class="section-label">Home-screen launcher</div><div class="card">
+    <div class="switch-row"><div><div class="list-title">Show today on your home screen</div><div class="list-sub">Lets a home-screen launcher you allow show what's due and your next workout. Nothing leaves the phone. Shows even while App lock is on</div></div>
+      <label class="switch"><input type="checkbox" id="setLauncher" ${s.launcherShare?'checked':''} aria-label="Show today on your home screen"><span></span></label></div>
+    ${s.launcherShare ? `<div class="switch-row" style="border-top:1px solid var(--hair)"><div><div class="list-title">Show compound names</div><div class="list-sub">Off: the home screen just says "1 dose due"</div></div>
+      <label class="switch"><input type="checkbox" id="setLauncherNames" ${s.launcherNames?'checked':''} aria-label="Show compound names on the home screen"><span></span></label></div>` : ''}
+  </div>`;
+
   const lb = s.lastBackupAt ? `${fmtDate(s.lastBackupAt)} ${fmtTime(s.lastBackupAt)}` : 'Never';
   html += `<div class="section-label">Backup</div><div class="card">
     ${isNative ? `<div class="switch-row"><div><div class="list-title">Daily automatic backup</div><div class="list-sub">Saved to Documents/ETS on this phone. The last 14 days are kept.</div></div>
@@ -1738,6 +1849,7 @@ function openCompoundSheet(id, opts={}){
       <label class="switch-row proto-only" style="margin-bottom:12px"><span><span class="list-title">Supplement</span><br><span class="list-sub">Shown in a quick checklist on Today instead of a full dose card</span></span><span class="switch"><input type="checkbox" id="cSupp" ${c.supplement?'checked':''}><span></span></span></label>
     </div>
     <div class="calc" id="cRecon"></div>
+    ${ex && ex.vial && ex.vial.sizeMl > 0 ? `<div class="hint" style="margin:-6px 0 14px">${labTested(ex) ? `<span class="lab-tag">${esc(testedText(ex))}</span> ` : ''}<button type="button" class="chip-btn" data-action="lab-test" data-id="${esc(ex.id)}">${labTested(ex) ? 'Change the lab test result' : 'Have a lab test result for this vial?'}</button></div>` : ''}
     <div class="field"><span class="field-label">Dose unit</span>${segHtml('cUnit',[['mg','mg'],['mcg','mcg'],['g','g'],['iu','IU']], okUnit(c.unit)).replace(/data-v="(g|iu)"/g, `data-v="$1" data-oral-only ${c.form==='oral'?'':'hidden'}`)}<div class="hint" id="cUnitNote" hidden></div></div>
     <div id="protoBox" ${so0?'hidden':''}>
     <div class="row2">
@@ -1790,8 +1902,14 @@ function openCompoundSheet(id, opts={}){
       </div>
       <div class="hint" id="cVialHint" style="margin:-6px 0 12px">${c.form==='oral' ? 'Each logged dose takes its tablets off. Sealed bottles you have on hand go in the Stock tab.' : 'Each logged injection subtracts its volume. For powder vials the size is the water you added. Sealed vials you have on hand go in the Stock tab.'}</div>
     </details>
-    <details class="more" ${c.halfLife?'open':''}><summary>Half-life (for the levels chart)</summary>
-      <div class="field"><label for="cHalf">Half-life (days)</label><input id="cHalf" type="number" inputmode="decimal" min="0" step="any" placeholder="From your prescriber or product info" value="${esc(c.halfLife||'')}"></div>
+    <details class="more" id="cHalfBox" ${c.halfLife || halfLifeFor(c.name) ? 'open' : ''}><summary>Half-life (for the levels chart)</summary>
+      <div class="field"><label for="cHalf">Half-life (days)</label><input id="cHalf" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 8 for testosterone cypionate" value="${esc(c.halfLife||'')}"></div>
+      <div class="calc" id="cHalfSug" hidden style="margin:-4px 0 12px"></div>
+      <details class="hl-list"><summary>Common half-lives</summary>
+        <input type="search" id="cHalfFind" placeholder="Find a compound" aria-label="Find a compound" autocomplete="off" style="margin:8px 0">
+        <div id="cHalfList">${HALF_LIVES.map((h,i)=>`<button type="button" class="hl-row" data-hl="${i}"><span>${esc(h[0])}</span><span class="mono">${esc(h[2])}</span></button>`).join('')}</div>
+        <p class="small muted" style="margin:8px 0 0">Published estimates from studies and product information. Real levels vary from person to person, so treat the chart as a rough guide. Blends (like Sustanon) and compounds without a published human figure (such as BPC-157, TB-500, melanotan II, GHK-Cu and CJC-1295 without DAC) aren't listed: use your prescriber's or the maker's figure.</p>
+      </details>
     </details>
     <div class="sheet-actions"><button class="btn btn-block" id="cSave">${ex?'Save changes':'Add compound'}</button><div class="form-err" id="cErr" role="alert" style="margin-top:6px; min-height:0"></div></div>
     ${ex?`<button class="btn btn-danger btn-block" style="margin-top:10px" id="cDel">Remove compound</button>`:''}
@@ -1870,6 +1988,29 @@ function openCompoundSheet(id, opts={}){
     syncWeek(); recon();
   };
   bindSeg('cForm', applyForm);
+  // half-life: suggest the published figure for a compound we know, and a list to pick from
+  const halfSug = ()=>{
+    const h = halfLifeFor(f('cName').value), box = f('cHalfSug'), cur = num(f('cHalf').value);
+    if(!h || (cur > 0 && Math.abs(cur - h[1]) < 1e-9)){ box.hidden = true; return; }
+    box.hidden = false;
+    box.innerHTML = `${esc(h[0])}: published half-life ${esc(h[2])}. <button type="button" class="chip-btn" id="cHalfUse" style="margin-left:4px">Use ${esc(String(h[1]))} days</button>`;
+    f('cHalfUse').addEventListener('click', ()=>{ f('cHalf').value = h[1]; halfSug(); });
+    if(!(cur > 0)) f('cHalfBox').open = true;
+  };
+  f('cName').addEventListener('input', halfSug);
+  f('cHalf').addEventListener('input', halfSug);
+  halfSug();
+  f('cHalfList').addEventListener('click', e=>{
+    const b = e.target.closest('[data-hl]'); if(!b) return;
+    const h = HALF_LIVES[+b.dataset.hl];
+    f('cHalf').value = h[1];
+    if(!f('cName').value.trim()) f('cName').value = h[0];
+    b.closest('details').open = false; halfSug(); toast(`Half-life set to ${h[1]} days`);
+  });
+  f('cHalfFind').addEventListener('input', e=>{
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll('#cHalfList .hl-row').forEach(b=>{ const h = HALF_LIVES[+b.dataset.hl]; b.hidden = !!q && ![h[0], ...h[3]].some(x=>x.toLowerCase().includes(q)); });
+  });
   const applyStockOnly = ()=>{ const on = f('cStockOnly').checked; f('protoBox').hidden = on; document.querySelectorAll('#sheetRoot .proto-only').forEach(x=>{ x.hidden = on; }); if(!ex) f('cSave').textContent = on ? 'Add to stock' : 'Add compound'; else if(opts.startUsing) f('cSave').textContent = on ? 'Save changes' : 'Start using'; };
   f('cStockOnly').addEventListener('change', applyStockOnly); applyStockOnly();
   bindSeg('cPiece', applyForm);
@@ -2033,6 +2174,7 @@ function openCompoundSheet(id, opts={}){
     const half = num(f('cHalf').value);
     const prevSched = ex ? JSON.stringify([ex.schedule, perDay(ex)]) : null;
     const wasOral = ex ? isOral(ex) : null, wasParked = !!(ex && ex.stockOnly);
+    const prevStrength = ex ? ex.strength : null;
     const prevStart = ex && ex.schedule ? ex.schedule.start : null;
     const out = ex || {id:uid(), createdAt:new Date().toISOString(), pauses:[]};
     if(ex) out._oldCycle = ex.cycle ? {...ex.cycle} : null;
@@ -2055,9 +2197,11 @@ function openCompoundSheet(id, opts={}){
       vial: vialSize>0 ? vialFromSheet(ex, vialSize, remain) : null,
       halfLife: half>0 ? half : null,
       sites: oral ? [] : [...mySites].filter(x=>SITES[segVal('cRoute')].includes(x)),
-      doseHistory: hist
+      doseHistory: hist, hlChecked: true
     });
     if(stockOnly) out.stockOnly = true; else delete out.stockOnly;
+    // a lab-tested strength stays only while the strength isn't changed by hand here
+    if(out.vial && out.vial.tested && !(prevStrength > 0 && Math.abs(out.strength - prevStrength) < 1e-9)) delete out.vial.tested;
     if(oral) Object.assign(out, {perDay: timesADay(), piece: segVal('cPiece') || 'tablet', supplement: f('cSupp').checked});
     else { delete out.perDay; delete out.piece; delete out.supplement; }
     // vials (mL) and bottles (tablets) don't convert: switching between an injectable and an oral starts stock afresh
@@ -2256,6 +2400,7 @@ function openLogSheet(opts={}){
     if(ex){
       adjustStock(ex.compoundId, ex.volumeMl||0, ex.date); // undo old
       Object.assign(ex, {compoundId:cid, compoundName: c?c.name:ex.compoundName, strength, unit, dose:mg, volumeMl:vol, date:dt.toISOString(), site, notes});
+      delete ex.labFix;        // edited by hand: what's entered now is the record
       if(isOral(c)) ex.piece = c.piece || 'tablet'; else if(c) delete ex.piece;
       adjustStock(cid, -(vol||0), ex.date);
     } else {
@@ -2443,15 +2588,24 @@ function newVial(id){
     ${avail.length ? `<div class="field"><span class="field-label">Which ${cw}</span>${segHtml('vFrom', avail.map(x=>[x.id, esc(optLabel(x))]).concat([['none','Not from Stock']]), pick0 ? pick0.id : 'none')}</div>` : ''}
     <div class="field" ${powder?'hidden':''}><label for="vSize">${oral ? `${cap1(pieceW(c,2))} in the ${cw}` : 'Vial size (mL)'}</label><input id="vSize" type="number" inputmode="decimal" min="0" step="any" value="${esc(size0)}"></div>
     ${powder?`<div class="row2"><div class="field"><label for="vPowder">Powder (mg)</label><input id="vPowder" type="number" inputmode="decimal" step="any" value="${esc(pick0 ? pick0.powderMg : (c.powderMg||''))}"></div><div class="field"><label for="vWater">Water added (mL)</label><input id="vWater" type="number" inputmode="decimal" step="any" value="${esc(c.waterMl||'')}"></div></div>`:''}
+    ${labTested(c) ? `<div class="field" id="vTestF"><span class="field-label">Is this ${cw} from the lab-tested batch${c.vial.batch ? ` (${esc(c.vial.batch)})` : ''}?</span>${segHtml('vTest', [['same', `Yes: ${esc(labAmountText(c, powder ? c.powderMg : c.strength))}`], ['other', `No: label ${esc(labAmountText(c, c.vial.tested.label))}`]], null)}<div class="hint">This sets the strength your doses are worked out from, so check the batch number on the ${cw}.</div></div>` : ''}
     <div class="calc" id="vNote" hidden></div>
     <button class="btn btn-block" id="vSave">Start new ${cw}</button><div class="form-err" id="vErr" role="alert"></div>`);
-  let pick = pick0;
+  let pick = pick0, testAns = null;
+  const prevTest = labTested(c), prevBatch = c.vial ? c.vial.batch : null;
+  const testQ = ()=>{ const f = $('#vTestF'); if(f) f.hidden = !!pick; };      // a vial from Stock brings its own strength
   const note = ()=>{
+    testQ();
     const el = $('#vNote'), bits = [];
+    if(pick && pick.tested) bits.push(`This batch is lab-tested: ${labAmountText(c, powder ? pick.powderMg : pick.strength)} (label ${labAmountText(c, pick.tested.label)}).`);
     if(pick && !powder && Math.abs(pick.strength - c.strength) > 1e-9) bits.push(oral ? `Strength changes from ${fmtAmt(c.strength, c.unit)} to ${fmtAmt(pick.strength, c.unit)} per ${pieceW(c,1)}. Doses you log from now on use the new strength.` : `Strength changes from ${round(c.strength,3)} to ${round(pick.strength,3)} mg/mL. Doses you log from now on use the new strength.`);
     if(pick && pick.expiry && pick.expiry < ymd(new Date())) bits.push(`This ${cw} ${expText(pick.expiry)}.`);
     el.hidden = !bits.length; el.textContent = bits.join(' ');
   };
+  if(prevTest) bindSeg('vTest', v=>{
+    testAns = v;
+    if(powder) $('#vPowder').value = v==='same' ? c.powderMg : prevTest.label;
+  });
   if(avail.length) bindSeg('vFrom', v=>{
     pick = avail.find(x=>x.id===v) || null;
     if(pick && !powder) $('#vSize').value = pick.sizeMl;
@@ -2461,6 +2615,7 @@ function newVial(id){
   note();
   $('#vSave').addEventListener('click', ()=>{
     let size = num($('#vSize').value);
+    if(prevTest && !pick && !testAns) return $('#vErr').textContent = `Say whether this ${cw} is from the lab-tested batch.`;
     if(powder){
       const p = num($('#vPowder').value), w = num($('#vWater').value);
       if(!(p>0 && w>0)) return $('#vErr').textContent = 'Enter the powder amount and water added.';
@@ -2468,9 +2623,12 @@ function newVial(id){
     }
     if(!(size>0)) return $('#vErr').textContent = oral ? `Enter how many ${pieceW(c,2)} are in the ${cw}.` : 'Enter the vial size in mL.';
     if(pick && !powder) c.strength = round(pick.strength, 6);
+    // not from Stock, after a lab-tested vial: the same batch keeps the tested strength, another goes back to the label
+    if(!pick && prevTest && testAns==='other' && !powder) c.strength = round(prevTest.label, 6);
     if(pick) pick.count = Math.max(0, pick.count - 1);
     c.vial = {sizeMl:size, remainingMl:size, openedAt:new Date().toISOString()};
-    if(pick){ if(pick.price>0) c.vial.price = pick.price; if(pick.expiry) c.vial.expiry = pick.expiry; if(pick.batch) c.vial.batch = pick.batch; }
+    if(pick){ if(pick.price>0) c.vial.price = pick.price; if(pick.expiry) c.vial.expiry = pick.expiry; if(pick.batch) c.vial.batch = pick.batch; if(pick.tested) c.vial.tested = {...pick.tested}; }
+    else if(prevTest && testAns==='same'){ c.vial.tested = {...prevTest}; if(prevBatch) c.vial.batch = prevBatch; }
     save(); closeSheet(); render(); haptic();
     toast(pick ? `New ${cw} started · ${sealedCount(c)} sealed left` : `New ${cw} started`);
   });
@@ -2507,11 +2665,11 @@ function stockCard(c){
   const soon = ymd(addDays(new Date(), 30)), today = ymd(new Date());
   const expBit = k => k ? ` · <span class="${k <= soon ? 'exp-warn' : ''}">${k < today ? 'expired' : 'exp'} ${esc(fmtShortY(parseYmd(k)))}</span>` : '';
   // a summary: tapping the name opens the screen where everything is edited
-  let h = `<div class="card stock-card"><div class="card-head"><div class="grow tap-row stock-title" data-action="stock-detail" data-id="${esc(c.id)}" aria-label="${esc(`Edit ${c.name} stock`)}"><div class="dose-name">${esc(c.name)} <span class="stock-chev" aria-hidden="true">›</span></div><div class="small muted">${esc(strengthLabel(c))}</div></div>${tag}</div>`;
+  let h = `<div class="card stock-card"><div class="card-head"><div class="grow tap-row stock-title" data-action="stock-detail" data-id="${esc(c.id)}" aria-label="${esc(`Edit ${c.name} stock`)}"><div class="dose-name">${esc(c.name)} <span class="stock-chev" aria-hidden="true">›</span></div><div class="small muted">${esc(strengthLabel(c))}${labTested(c) ? `<br><span class="lab-tag">${esc(testedText(c))}</span>` : ''}</div></div>${tag}</div>`;
   h += `<div class="kv"><span>Open ${contW(c)}</span><span>${st ? `${round(st.rem,2)} / ${round(c.vial.sizeMl,2)} ${esc(volUnit(c,2))} · ${fmtStock(oh.openMg, c.unit)}${expBit(c.vial.expiry)}` : 'None'}</span></div>`;
   lines.forEach(x=>{
     const extra = `${x.price>0 ? ` · ${fmtMoney(x.price)}` : ''}${expBit(x.expiry)}${x.batch ? ` · batch ${esc(x.batch)}` : ''}`;
-    h += `<div class="kv kv-wrap"><span>Sealed · ${esc(lineLabel(c, x))}<br><span class="small muted">${fmtStock(sealedMg(c, x), c.unit)} each${extra}</span></span><span>× ${x.count}</span></div>`;
+    h += `<div class="kv kv-wrap"><span>Sealed · ${esc(lineLabel(c, x))}${x.tested ? ' <span class="lab-tag">lab-tested</span>' : ''}<br><span class="small muted">${fmtStock(sealedMg(c, x), c.unit)} each${extra}</span></span><span>× ${x.count}</span></div>`;
   });
   h += `<div class="kv"><span>On hand</span><span>${fmtStock(oh.totalMg, c.unit)}${oh.sealed ? ` · ${oh.sealed} sealed` : ''}${oh.expired ? ` · <span class="exp-warn">${oh.expired} expired not counted</span>` : ''}</span></div>`;
   if(rt) h += `<div class="kv ${short?'low':''}"><span>Lasts</span><span>${esc(rt)}</span></div>`;
@@ -2522,7 +2680,7 @@ function stockCard(c){
   }
   const cost = costInfo(c);
   if(cost && cost.week > 0) h += `<div class="kv"><span>Cost</span><span>${fmtMoney(cost.week)} a week · ${fmtMoney(cost.month)} a month</span></div>`;
-  h += `<div class="stock-btns"><button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add ${contW(c)}s</button>${inProtocol(c) ? `<button class="btn btn-outline" data-action="vial-new" data-id="${esc(c.id)}" aria-label="${esc(`Start a new ${contW(c)} of ${c.name}`)}">New ${contW(c)}</button>` : `<button class="btn btn-outline" data-action="stock-use" data-id="${esc(c.id)}">Start using</button>`}</div></div>`;
+  h += `<div class="stock-btns"><button class="btn btn-outline" data-action="stock-add" data-id="${esc(c.id)}">Add ${contW(c)}s</button>${inProtocol(c) ? `<button class="btn btn-outline" data-action="vial-new" data-id="${esc(c.id)}" aria-label="${esc(`Start a new ${contW(c)} of ${c.name}`)}">New ${contW(c)}</button>` : `<button class="btn btn-outline" data-action="stock-use" data-id="${esc(c.id)}">Start using</button>`}${c.vial && c.vial.sizeMl > 0 ? `<button class="btn btn-outline" data-action="lab-test" data-id="${esc(c.id)}" aria-label="${esc(`Lab test result for ${c.name}`)}">Lab test</button>` : ''}</div></div>`;
   return h;
 }
 /* One screen for everything in a compound's stock: its name and strength, the open vial or bottle, and every
@@ -2533,7 +2691,7 @@ function openStockDetail(cid){
   const cur = esc(String(db.settings.currency||'$').slice(0,4)), many = oral ? pieceW(c, 2) : 'mL';
   const strIn = x => x ? round(oral ? fromMg(x, c.unit) : x, 4) : '';
   const lineHtml = (x, i) => `<div class="sd-line" data-line="${esc(x.id || '')}" data-i="${i}">
-    <div class="sd-line-head"><b>${x.id ? `Sealed · ${esc(lineLabel(c, x))}` : `New sealed ${cw}s`}</b><button type="button" class="chip-btn chip-danger sd-remove">Remove</button></div>
+    <div class="sd-line-head"><b>${x.id ? `Sealed · ${esc(lineLabel(c, x))}${x.tested ? ' · lab-tested' : ''}` : `New sealed ${cw}s`}</b><button type="button" class="chip-btn chip-danger sd-remove">Remove</button></div>
     <div class="sd-removed small" hidden>Will be removed when you save. <button type="button" class="chip-btn sd-undo">Keep</button></div>
     <div class="sd-fields">
       <div class="row2">
@@ -2553,7 +2711,9 @@ function openStockDetail(cid){
     <div class="section-label">Compound</div>
     <div class="field"><label for="sdName">Name</label><input id="sdName" autocomplete="off" value="${esc(c.name)}"></div>
     ${powder ? `<div class="calc" style="margin-bottom:12px">${esc(strengthLabel(c))} (${esc(c.powderMg||'')} mg in ${esc(c.waterMl||'')} mL of water)</div>`
-      : `<div class="field"><label for="sdStr">${oral ? `Each ${pieceW(c,1)} contains (${esc(uL(c.unit))})` : 'Strength (mg/mL)'}</label><input id="sdStr" type="number" inputmode="decimal" min="0" step="any" value="${esc(strIn(c.strength))}"><div class="hint" id="sdStrNote" hidden>Doses you log from now on use the new strength${inProtocol(c) && c.dosePerInj ? `, so each dose is a different ${oral ? `number of ${pieceW(c,2)}` : 'volume'}` : ''}.</div></div>`}
+      : `<div class="field"><label for="sdStr">${oral ? `Each ${pieceW(c,1)} contains (${esc(uL(c.unit))})` : 'Strength (mg/mL)'}</label><input id="sdStr" type="number" inputmode="decimal" min="0" step="any" value="${esc(strIn(c.strength))}">${labTested(c) ? `<div class="hint lab-tag">${esc(testedText(c))}</div>` : ''}<div class="hint" id="sdStrNote" hidden>Doses you log from now on use the new strength${inProtocol(c) && c.dosePerInj ? `, so each dose is a different ${oral ? `number of ${pieceW(c,2)}` : 'volume'}` : ''}.</div></div>`}
+    ${powder && labTested(c) ? `<div class="hint lab-tag" style="margin:-6px 0 12px">${esc(testedText(c))}</div>` : ''}
+    ${v.sizeMl > 0 ? `<button type="button" class="btn btn-outline btn-block" data-action="lab-test" data-id="${esc(c.id)}" style="margin-bottom:6px">${labTested(c) ? 'Lab test result' : 'Enter a lab test result'}</button>` : ''}
     <button type="button" class="btn btn-outline btn-block" id="sdMore" style="margin-bottom:6px">${inProtocol(c) ? 'Schedule, dose and other settings' : 'Form, unit and other settings'}</button>
     <div class="section-label">Open ${cw}</div>
     <div class="row2">
@@ -2604,6 +2764,8 @@ function openStockDetail(cid){
       if(exp && !okYmd(exp)) return err.textContent = `Open ${cw}: pick the expiry date, or leave it empty.`;
       vial = vialFromSheet(c, size, left);
       ['price','expiry','batch'].forEach(k=>delete vial[k]);
+      // a lab-tested strength only stays while the strength isn't changed by hand
+      if(c.vial && c.vial.tested && Math.abs(round(strength, 6) - c.strength) < 1e-9) vial.tested = c.vial.tested; else delete vial.tested;
       if(num(price)>0) vial.price = round(num(price), 2); if(exp) vial.expiry = exp;
       const batch = $('#sdVBatch').value.trim().slice(0, 40); if(batch) vial.batch = batch;
     }
@@ -2626,6 +2788,8 @@ function openStockDetail(cid){
       if(price && !(num(price)>=0 && num(price)<=1000000)) return err.textContent = `${label}: enter the price as a number, or leave it empty.`;
       if(exp && !okYmd(exp)) return err.textContent = `${label}: pick the expiry date, or leave it empty.`;
       o.price = num(price)>0 ? round(num(price), 2) : null; o.expiry = exp || null; o.batch = q('.sd-batch').value.trim().slice(0, 40);
+      const was = stockLines(c).find(x=>x.id===o.id);       // keeps its lab test while its strength isn't changed by hand
+      if(was && was.tested && (powder ? Math.abs(was.powderMg - o.powderMg) < 1e-9 : Math.abs(was.strength - o.strength) < 1e-9)) o.tested = was.tested;
       lines.push(o);
     }
     if(lines.length > 20) return err.textContent = 'That’s the most kinds of vial one compound can have (20).';
@@ -2636,6 +2800,127 @@ function openStockDetail(cid){
     db.logs.forEach(l=>{ if(l.compoundId===c.id) l.compoundName = c.name; });
     save(); closeSheet(); render(); haptic(); toast('Stock saved');
   });
+}
+/* ================= Lab test results =================
+   A lab test (e.g. of a vial from a batch) shows the real strength, which can be above or below the label. Entering
+   it makes the open vial, and sealed vials of the same batch, use the tested strength: your dose in mg stays the same
+   and the amount you draw (or the number of tablets) changes to deliver it. Doses already logged from the open vial
+   are corrected to what was actually taken (the volume drawn stays the same). Everything can be undone. */
+const labTested = c => c && c.vial && c.vial.tested ? c.vial.tested : null;
+function labAmountText(c, mg){ return isPowder(c) ? `${round(mg, 3)} mg of powder` : isOral(c) ? `${fmtAmt(mg, c.unit)} per ${pieceW(c, 1)}` : `${round(mg, 3)} mg/mL`; }
+function testedText(c){
+  const t = labTested(c); if(!t) return '';
+  return `Lab-tested${t.at ? ` ${fmtShortY(parseYmd(t.at))}` : ''} · label ${labAmountText(c, t.label)}`;
+}
+const sameBatch = (a, b) => !!a && !!b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+/* the amount per dose for a strength, as plain text: "0.59 mL (59 units on U-100)" or "1.5 tablets" */
+function doseAmountText(c, strength){
+  if(!(c.dosePerInj > 0) || !(strength > 0)) return '';
+  const v = c.dosePerInj / strength;
+  return isOral(c) ? takeText(c, v) : `${round(v, 2)} mL${v <= 1 ? ` (${round(v*100, 1)} units on a U-100 syringe)` : ''}`;
+}
+function openLabTestSheet(cid){
+  const c = db.compounds.find(x=>x.id===cid); if(!c) return;
+  const powder = isPowder(c), oral = isOral(c), v = c.vial, cw = contW(c);
+  if(!v || !(v.sizeMl > 0)) return openSheet(`<h2>Lab test result</h2><p class="muted" style="margin-top:-6px">${esc(c.name)}</p>
+    <p>A test result applies to the ${cw} you're using. Start a ${cw} first (Stock → New ${cw}), then enter the result here.</p>`);
+  const t0 = v.tested;
+  const label = t0 ? t0.label : (powder ? +c.powderMg : +c.strength);          // what the label says
+  const now0 = powder ? +c.powderMg : +c.strength;                               // what the app uses now
+  const unitTxt = powder ? 'mg in the vial' : oral ? `${uL(c.unit)} per ${pieceW(c, 1)}` : 'mg/mL';
+  const toMgIn = x => oral ? toMg(x, c.unit) : x, fromMgOut = x => oral ? round(fromMg(x, c.unit), 4) : round(x, 4);
+  const opened = v.openedAt ? new Date(v.openedAt) : null;
+  openSheet(`<h2>Lab test result</h2>
+    <p class="muted" style="margin-top:-6px">${esc(c.name)}${v.batch ? ` · batch ${esc(v.batch)}` : ''}</p>
+    <p class="small" style="margin-top:0">If a lab test shows the real ${powder ? 'amount of powder' : 'strength'} is different from the label, enter it here. Your dose stays ${c.dosePerInj ? `<b>${esc(fmtAmt(c.dosePerInj, c.unit))}</b>` : 'the same'}: the app changes how much you ${oral ? 'take' : 'draw'} so you get it.</p>
+    <div class="kv" style="border:none; padding-top:0"><span>Label</span><span class="mono">${esc(labAmountText(c, label))}</span></div>
+    ${t0 ? `<div class="kv"><span>Tested now</span><span class="mono">${esc(labAmountText(c, now0))}</span></div>` : ''}
+    <div class="field" style="margin-top:12px"><label for="ltVal">Tested ${powder ? 'amount' : 'strength'} (${esc(unitTxt)})</label><input id="ltVal" type="number" inputmode="decimal" min="0" step="any" value="${t0 ? esc(fromMgOut(now0)) : ''}" placeholder="From the lab report"></div>
+    <div class="row2">
+      <div class="field"><label for="ltDate">Test date</label><input id="ltDate" type="date" value="${esc(t0 && t0.at || ymd(new Date()))}"></div>
+      <div class="field"><label for="ltNote">Lab (optional)</label><input id="ltNote" maxlength="80" autocomplete="off" value="${esc(t0 ? t0.note : '')}"></div>
+    </div>
+    <div class="lt-warn" id="ltWarn" role="alert" hidden></div>
+    <div class="calc" id="ltPrev" hidden></div>
+    <label class="switch-row" id="ltOkRow" hidden style="margin-top:10px"><span><span class="list-title">I've checked this result</span><br><span class="list-sub">It's a big difference from the label. Make sure the number and unit match the lab report.</span></span><span class="switch"><input type="checkbox" id="ltOk"><span></span></span></label>
+    <div class="sheet-actions"><button class="btn btn-block" id="ltSave" disabled>Use the tested ${powder ? 'amount' : 'strength'}</button><div class="form-err" id="ltErr" role="alert" style="margin-top:6px; min-height:0"></div>
+      ${t0 ? `<button class="btn btn-outline btn-block" id="ltRemove" style="margin-top:10px">Remove the test result (back to the label)</button>` : ''}</div>`);
+  // what saving would change
+  const plan = tested => {
+    const newStrength = powder ? tested / c.waterMl : tested;
+    // sealed vials of the same batch that are at the same label strength (or already tested against it)
+    const lines = stockLines(c).filter(x=>sameBatch(x.batch, v.batch) && Math.abs((x.tested ? x.tested.label : (powder ? x.powderMg : x.strength)) - label) < 1e-6 * Math.max(1, label));
+    const logs = opened ? db.logs.filter(l=>l.compoundId===c.id && !l.skipped && l.volumeMl > 0 && new Date(l.date) >= opened && Math.abs((+l.strength||0) - c.strength) < 1e-6 * Math.max(1, c.strength)) : [];
+    return {newStrength, lines, logs};
+  };
+  const read = ()=> num($('#ltVal').value);
+  const show = ()=>{
+    // live problems go in their own box: the sheet clears form errors as you type
+    const raw = read(), box = $('#ltPrev'), btn = $('#ltSave'), okRow = $('#ltOkRow'), warn = $('#ltWarn');
+    const err = {set textContent(t){ warn.textContent = t; warn.hidden = !t; }};
+    err.textContent = ''; box.hidden = true; okRow.hidden = true; btn.disabled = true;
+    if(!(raw > 0)) return;
+    const tested = toMgIn(raw);
+    if(powder && !(c.waterMl > 0)) { err.textContent = 'Add the water you mixed in (in the compound settings) first.'; return; }
+    const ratio = tested / label;
+    if(!(ratio >= 0.25 && ratio <= 4)){ err.textContent = `That's ${ratio < 1 ? 'less than a quarter of' : 'over four times'} the label. Check the number and the unit (${unitTxt}) on the lab report.`; return; }
+    const p = plan(tested), pct = Math.round((ratio - 1) * 100);
+    const bits = [];
+    bits.push(`<b>${esc(labAmountText(c, tested))}</b> is ${Math.abs(pct) < 1 ? 'the same as the label' : `${Math.abs(pct)}% ${pct < 0 ? 'under' : 'over'} the label`}.`);
+    if(c.dosePerInj > 0){
+      const before = doseAmountText(c, c.strength), after = doseAmountText(c, p.newStrength);
+      bits.push(`Your dose stays <b>${esc(fmtAmt(c.dosePerInj, c.unit))}</b>. ${oral ? 'Take' : 'Draw'} <b>${esc(after)}</b> instead of ${esc(before)}.`);
+      const cap = parseFloat(c.barrel);
+      if(!oral && cap > 0 && c.dosePerInj / p.newStrength > cap + 1e-9) bits.push(`<b>That's more than your ${esc(c.barrel)} syringe holds.</b> Use a bigger syringe, or split the dose.`);
+    }
+    const st = stockInfo(c);
+    if(st) bits.push(`What's left in the open ${cw}: ${esc(fmtStock(st.rem * c.strength, c.unit))} becomes ${esc(fmtStock(st.rem * p.newStrength, c.unit))}.`);
+    bits.push(p.lines.length ? `Also applies to ${p.lines.reduce((n,x)=>n+x.count,0)} sealed ${cw}${p.lines.reduce((n,x)=>n+x.count,0)===1?'':'s'} of batch ${esc(v.batch)}.` : v.batch ? `No sealed ${cw}s of batch ${esc(v.batch)} in Stock.` : `Applies to the open ${cw} only. (Add its batch number in Stock to apply a result to sealed ${cw}s of the same batch.)`);
+    if(p.logs.length){
+      const l0 = p.logs[p.logs.length-1], after0 = l0.volumeMl * p.newStrength;
+      bits.push(`Corrects ${p.logs.length} dose${p.logs.length===1?'':'s'} logged since you opened this ${cw} to what you actually got: e.g. ${esc(fmtAmt(l0.dose, l0.unit || c.unit))} → ${esc(fmtAmt(after0, l0.unit || c.unit))}. The amounts you ${oral ? 'took' : 'drew'} stay the same.`);
+    } else if(!opened) bits.push(`Doses already logged stay as they are (the app doesn't know when this ${cw} was opened).`);
+    box.innerHTML = bits.map(x=>`<div style="margin:4px 0">${x}</div>`).join(''); box.hidden = false;
+    const big = Math.abs(ratio - 1) >= 0.2;
+    okRow.hidden = !big;
+    btn.disabled = big && !$('#ltOk').checked;
+  };
+  ['ltVal'].forEach(id=>$('#'+id).addEventListener('input', show));
+  $('#ltOk').addEventListener('change', show);
+  show();
+  $('#ltSave').addEventListener('click', ()=>{
+    const raw = read(), tested = toMgIn(raw), at = $('#ltDate').value, note = $('#ltNote').value.trim().slice(0, 80);
+    if(!(raw > 0)) return;
+    if(at && (!okYmd(at) || at > ymd(new Date()))) return $('#ltErr').textContent = 'Pick the date of the test (today or earlier).';
+    const ratio = tested / label;
+    if(!(ratio >= 0.25 && ratio <= 4)) return;
+    if(Math.abs(ratio - 1) >= 0.2 && !$('#ltOk').checked) return;
+    const p = plan(tested);
+    takeSnapshot('lab test');
+    const info = {label, at: at || ymd(new Date()), note};
+    p.logs.forEach(l=>{ if(!l.labFix) l.labFix = {dose: l.dose, strength: l.strength}; l.strength = round(p.newStrength, 6); l.dose = round(l.volumeMl * p.newStrength, 6); });
+    p.lines.forEach(x=>{ if(powder) x.powderMg = round(tested, 6); else x.strength = round(tested, 6); x.tested = {...info}; });
+    if(powder) c.powderMg = round(tested, 6);
+    c.strength = round(p.newStrength, 6);
+    v.tested = info;
+    save(); closeSheet(); render(); haptic('success');
+    toast(c.dosePerInj > 0 ? `Saved. Your dose stays ${fmtAmt(c.dosePerInj, c.unit)}: ${oral ? 'take' : 'draw'} ${doseAmountText(c, c.strength)}.` : 'Lab test result saved.', {label:'Undo', fn:undoSnapshot});
+  });
+  if(t0) $('#ltRemove').addEventListener('click', e=>armButton(e.currentTarget, 'Tap again to go back to the label', ()=>{
+    takeSnapshot('lab test removed');
+    const back = powder ? label / c.waterMl : label;
+    stockLines(c).forEach(x=>{ if(x.tested && sameBatch(x.batch, v.batch) && Math.abs(x.tested.label - label) < 1e-6){ if(powder) x.powderMg = label; else x.strength = label; delete x.tested; } });
+    // doses since the vial was opened: ones the test corrected go back to how they were logged; ones logged while the
+    // test was in use were worked out at the tested strength, so at the label strength they were really volume × label
+    if(opened) db.logs.forEach(l=>{
+      if(l.compoundId!==c.id || l.skipped || new Date(l.date) < opened) return;
+      if(l.labFix){ l.dose = l.labFix.dose; l.strength = l.labFix.strength; delete l.labFix; }
+      else if(l.volumeMl > 0 && Math.abs((+l.strength||0) - c.strength) < 1e-6 * Math.max(1, c.strength)){ l.labFix = {dose: l.dose, strength: l.strength}; l.strength = round(back, 6); l.dose = round(l.volumeMl * back, 6); }
+    });
+    if(powder) c.powderMg = label;
+    c.strength = round(back, 6); delete v.tested;
+    save(); closeSheet(); render(); toast(`Back to the label ${powder ? 'amount' : 'strength'}`, {label:'Undo', fn:undoSnapshot});
+  }));
 }
 function openStockSheet(cid, lineId){
   const c = db.compounds.find(x=>x.id===cid);
@@ -2871,7 +3156,7 @@ function applyBackup(parsed){
   
   db.activeActivity = null; db.activeWorkout = parsed.activeWorkout; ui.draft = null; ui.tplEdit = null; ui.mode = 'inj';
   // these belong to this phone: privacy and security choices, its band, Google account, watch-data link, calendar export
-  const PHONE_KEYS = ['lockEnabled','lockAfter','autoBackup','lastBackupAt','lastBackupFile','lastBackupError','reminders','secureScreen','privateNotifs',
+  const PHONE_KEYS = ['lockEnabled','lockAfter','autoBackup','lastBackupAt','lastBackupFile','lastBackupError','reminders','secureScreen','privateNotifs','launcherShare','launcherNames',
     'health','hr','gdrive','backupCrypto','purgePlainLocal','purgePlainDrive','calUntil','calSig','calCount','calNudgeOff','installHintOff'];
   const local = {}, seeded = !!db.settings.tplSeeded;
   PHONE_KEYS.forEach(k=>{ if(k in db.settings) local[k] = db.settings[k]; });
@@ -3268,7 +3553,7 @@ function buildReport(jsPDF, opts){
     const nx = nextDoseChange(c); if(nx) notes.push(`${fmtAmt(nx.dose,c.unit)} from ${fmtD(parseYmd(nx.from))}`);
     if(c.halfLife) notes.push(`Half-life ${c.halfLife} d (entered)`);
     if(isOral(c) && c.supplement) notes.unshift('Supplement');
-    const strength = c.form==='powder' && c.powderMg ? `${c.powderMg} mg + ${c.waterMl} mL water (${round(c.strength,3)} mg/mL)` : strengthText(c);
+    const strength = (c.form==='powder' && c.powderMg ? `${c.powderMg} mg + ${c.waterMl} mL water (${round(c.strength,3)} mg/mL)` : strengthText(c)) + (labTested(c) ? `\nLab-tested (label ${labAmountText(c, labTested(c).label)})` : '');
     const pv = plannedVol(c);
     const per = isOral(c) ? (pv ? `\n${takeText(c, pv)}` : '') : pv ? `\n${round(pv,2)} mL${pv<=1?` / ${round(pv*100,1)} U`:''}` : '';
     return [c.name, strength, c.dosePerInj ? `${fmtAmt(c.dosePerInj,c.unit)}${per}` : '—',
@@ -3715,6 +4000,7 @@ document.addEventListener('click', e=>{
     case 'vial-new': newVial(id); break;
     case 'stock-add': openStockSheet(id); break;
     case 'stock-detail': openStockDetail(id); break;
+    case 'lab-test': closeSheet(); openLabTestSheet(id); break;
     case 'stock-new': closeSheet(); openCompoundSheet(null, {stockOnly:true, thenStock:true}); break;
     case 'stock-use': closeSheet(); openCompoundSheet(id, {startUsing:true}); break;
     case 'supp-take': case 'supp-all': {
@@ -3820,6 +4106,8 @@ document.addEventListener('change', e=>{
   else if(t.id==='setRestNotify'){ db.settings.restNotify = t.checked; save(); }
   else if(t.id==='setSecure'){ db.settings.secureScreen = t.checked; save(); applySecureScreen(); toast(t.checked ? 'Screenshots blocked' : 'Screenshots allowed'); }
   else if(t.id==='setPrivNotif'){ db.settings.privateNotifs = t.checked; save(); toast(t.checked ? 'Reminders will not show names or doses' : 'Reminders show names and doses'); }
+  else if(t.id==='setLauncher'){ db.settings.launcherShare = t.checked; save(); render(); toast(t.checked ? 'Your launcher can show today\u2019s doses' : 'Stopped sharing with your launcher'); }
+  else if(t.id==='setLauncherNames'){ db.settings.launcherNames = t.checked; save(); toast(t.checked ? 'Names show on the home screen' : 'Names hidden on the home screen'); }
   else if(t.id==='setAutoBackup'){ db.settings.autoBackup = t.checked; save(); if(t.checked) backupNow(); }
   else if(t.id==='setWeekly'){ db.settings.weeklyReport = t.checked; save();  toast(t.checked ? 'Weekly report notification on' : 'Weekly report notification off'); }
   
@@ -3861,6 +4149,20 @@ document.addEventListener('keydown', e=>{
   if((e.key==='Enter' || e.key===' ') && e.target && e.target.matches && e.target.matches('.tap-row[role=button]')){ e.preventDefault(); e.target.click(); }
 });
 /* Rows built as <div class="tap-row" data-action> are announced and focusable as buttons. */
+/* Tablet mode helpers (only matter in two columns, see styles.css): a card with no card beside it takes the full
+   width ("solo"), and a long list or table of readings inside one flows its rows in two columns ("list2"). */
+function markColumns(main){
+  if(main.dataset.cols !== '2') return;
+  const isCard = el => !!el && (el.classList.contains('card') || el.classList.contains('dose'));
+  [...main.children].forEach(el=>{
+    if(!isCard(el)) return;
+    const solo = !isCard(el.previousElementSibling) && !isCard(el.nextElementSibling);
+    el.classList.toggle('solo', solo);
+    const kids = [...el.children];
+    const rows = kids.filter(k=>k.classList.contains('list-item') || k.classList.contains('kv'));
+    el.classList.toggle('list2', solo && rows.length >= 4 && rows.length >= kids.length - 1);
+  });
+}
 function markTapRows(root){ root.querySelectorAll('div.tap-row[data-action]:not([role])').forEach(el=>{ el.setAttribute('role','button'); el.tabIndex = 0; }); }
 ['pointermove','pointerdown'].forEach(ev=>document.addEventListener(ev, e=>{ if(e.target && e.target.id==='levels') chartHover(e); }));
 document.addEventListener('pointerleave', e=>{ if(e.target && e.target.id==='levels') { const t=$('#chartTip'); if(t) t.hidden=true; } }, true);
@@ -3892,7 +4194,7 @@ function initNative(){
     });
     // day may have changed while in the background
     App.addListener('pause', onAppPause);
-    App.addListener('resume', ()=>{ onAppResume(); if(!sheetOpen) render(); scheduleReminders(); scheduleAutoBackup();  setTimeout(()=>gdBackup(false), 3000); });
+    App.addListener('resume', ()=>{ onAppResume(); launcherPublish(); if(!sheetOpen) render(); scheduleReminders(); scheduleAutoBackup();  setTimeout(()=>gdBackup(false), 3000); });
   }
   if(LN){
     
@@ -3944,6 +4246,11 @@ load().then(async ()=>{
   if(db.settings.mode==='train' || db.settings.mode==='health'){ ui.mode = db.settings.mode; ui.tab = FIRST_TAB[ui.mode]; }
   
   render();
+  if(hlFilled.length){
+    const n = hlFilled.length;
+    setTimeout(()=>toast(n===1 ? `Added the published half-life for ${hlFilled[0]}, for the levels chart. Change it in Setup.` : `Added published half-lives for ${n} compounds, for the levels chart. Change them in Setup.`), 1500);
+    save();
+  }
   initNative();
   
   scheduleReminders();
@@ -3952,6 +4259,7 @@ load().then(async ()=>{
   setTimeout(()=>gdBackup(false), 6000);
   
   rawSet(STORE_KEY, JSON.stringify(db)); // persist any migration
+  launcherPublish();
 });
 
 // expose for debugging in dev tools

@@ -605,3 +605,68 @@ a.btn{text-decoration:none; display:flex; align-items:center; justify-content:ce
 .cal-item{flex-wrap:wrap; row-gap:10px;}
 .cal-item .list-main{flex:1 1 150px;}
 .cal-acts{display:flex; gap:6px; align-items:center; margin-left:auto;}
+
+/* compound sheet: common half-lives */
+.hl-list summary{cursor:pointer; font-family:var(--mono); font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); padding:6px 0;}
+.hl-row{display:flex; justify-content:space-between; gap:10px; width:100%; text-align:left; background:none; border:none; border-top:1px solid var(--hair); padding:10px 0; color:var(--text); font:inherit; font-size:14px; cursor:pointer; min-height:44px; align-items:center;}
+.hl-row .mono{font-size:12px; color:var(--muted); text-align:right; flex-shrink:0; max-width:45%;}
+
+/* lab-tested strength */
+.lab-tag{color:var(--signal); font-family:var(--mono); font-size:11px; letter-spacing:.03em;}
+.lt-warn{color:var(--signal); font-size:14px; margin:4px 0 12px; font-weight:600;}
+
+/* lab test preview: amounts and units in normal case, so mg and mL read correctly */
+#ltPrev { text-transform: none; font-family: inherit; font-size: 14px; letter-spacing: 0; }
+
+/* ---------- tablet mode ----------------------------------------------------------------------------------------
+   Turns on by width alone (tablets either way up, unfolded foldables, Chromebooks, the iPad web app, phones on
+   their side). From 600px the bottom tabs become a rail down the left and the content gets the rest of the width;
+   from 840px screens made of separate cards (main[data-cols="2"], set in render()) lay them out in two columns.
+   Sheets become centred dialogs when there's room above and below. */
+@media (min-width: 600px){
+  .app{max-width:none; display:grid; grid-template-columns:104px minmax(0,1fr); grid-template-rows:auto auto minmax(0,1fr) auto;}
+  .modebar{grid-column:2; grid-row:1; grid-template-columns:repeat(3, minmax(0,160px)); padding-left:max(16px, calc((100% - 1040px) / 2));}
+  .topbar{grid-column:2; grid-row:2; padding-left:max(24px, calc((100% - 1040px) / 2 + 8px)); padding-right:max(24px, calc((100% - 1040px) / 2 + 8px));}
+  main{grid-column:2; grid-row:3; padding:20px max(20px, calc((100% - 1040px) / 2)) 32px;}
+  .restbar{grid-column:2; grid-row:4;}
+  .tabbar{
+    grid-column:1; grid-row:1 / -1; display:flex; flex-direction:column; justify-content:flex-start;
+    border-top:none; border-right:1px solid var(--line); padding:var(--sat) 0 var(--sab); overflow-y:auto; scrollbar-width:none;
+  }
+  .tabbar::-webkit-scrollbar{display:none;}
+  .tab-btn{min-height:68px; flex:none; padding:0 6px; border-bottom:1px solid var(--hair);}
+  .tab-btn + .tab-btn{border-left:none;}
+  .tabbar.many .tab-btn{font-size:11px; letter-spacing:0.05em; padding:0 6px;}
+  /* one column, but not a narrow strip down the middle */
+  main[data-cols="1"] > *{max-width:760px;}
+  .toast{left:calc(50% + 52px); bottom:calc(24px + var(--sab)); max-width:min(560px, calc(100% - 136px));}
+}
+@media (min-width: 800px){
+  main[data-cols="2"]{display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); column-gap:16px; align-items:start; align-content:start;}
+  /* headings, banners, chips, buttons, notes and anything that isn't a card take the full width */
+  main[data-cols="2"] > :not(.card):not(.dose){grid-column:1 / -1;}
+  /* cards that are wide by nature: check-in, charts, tables, forms, the lab plan */
+  main[data-cols="2"] > .solo, main[data-cols="2"] > .checkin-card, main[data-cols="2"] > .lab-plan, main[data-cols="2"] > .card:has(canvas, table, .table-wrap){grid-column:1 / -1;}
+  /* a long list in one card: rows side by side, a line between each pair */
+  main[data-cols="2"] > .list2{display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); column-gap:32px; align-items:stretch;}
+  main[data-cols="2"] > .list2 > :not(.list-item):not(.kv){grid-column:1 / -1;}
+  main[data-cols="2"] > .list2 > .list-item, main[data-cols="2"] > .list2 > .kv{border-top:1px solid var(--hair);}
+  main[data-cols="2"] > .list2 > :is(.list-item, .kv):nth-child(-n+2){border-top:none;}
+  /* a single form card across the full width: keep the inputs a sensible length */
+  main[data-cols="2"] > .solo:not(.list2) > :is(.field, .row2, .hint, .switch-row){max-width:640px;}
+  main[data-cols="2"] > .act-grid{grid-template-columns:repeat(4, minmax(0,1fr));}
+}
+@media (min-width: 600px) and (min-height: 600px){
+  .sheet-bg{align-items:center; padding:24px;}
+  .sheet{max-width:600px; border:2px solid var(--line); max-height:min(88%, 920px); padding-bottom:20px; animation:pop .16s ease-out;}
+  .sheet-actions{padding-bottom:12px;}
+}
+@keyframes pop{from{transform:scale(.98); opacity:.6;} to{transform:none; opacity:1;}}
+@media (prefers-reduced-motion: reduce){ .sheet{animation:none;} }
+/* phones on their side: little height, so a slimmer header and rail */
+@media (min-width: 600px) and (max-height: 500px){
+  .topbar{padding-top:calc(10px + var(--sat)); padding-bottom:10px;}
+  .topbar h1{font-size:1.6rem;}
+  .tab-btn{min-height:52px;}
+  .mode-btn{min-height:40px;}
+}

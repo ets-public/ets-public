@@ -33,7 +33,19 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+        <!-- Companion home-screen launcher: read-only "today" summary, empty unless turned on in Setup -->
+        <provider
+            android:name=".LauncherSummaryProvider"
+            android:authorities="com.adam.injectiontracker.launcher"
+            android:exported="true"
+            android:readPermission="com.adam.injectiontracker.permission.READ_LAUNCHER_SUMMARY" />
     </application>
+
+    <!-- Lets an app the user allows (the companion launcher) read the summary above -->
+    <permission
+        android:name="com.adam.injectiontracker.permission.READ_LAUNCHER_SUMMARY"
+        android:label="see what is due today in ETS"
+        android:protectionLevel="dangerous" />
 
     <!-- Permissions -->
 

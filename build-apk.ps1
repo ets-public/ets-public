@@ -3,7 +3,10 @@
 # Free edition (injections only, for GitHub):  .\build-apk.ps1 -Edition free
 #   scripts\make-edition.mjs builds each edition from the same source into dist-www\ (the folder Capacitor packages)
 param(
-  [ValidateSet('premium','free')][string]$Edition = 'free'
+  [ValidateSet('premium','free')][string]$Edition = 'free',
+  # -Install: after a good build, offer to install it on a phone plugged in by USB (BUILD-APK.bat passes this;
+  # the release script doesn't, so releases never stop to ask)
+  [switch]$Install
 )
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -240,5 +243,47 @@ try {
 } finally {
   Stop-Transcript | Out-Null
 }
+
+# --- Optional: install on a phone plugged in by USB (needs USB debugging on) ---------------
+# Kept outside the build: a failed install never marks the build as failed.
+if ($Install -and -not $buildFailed) {
+  $ErrorActionPreference = 'Continue'
+  $adb = Join-Path $sdk 'platform-tools\adb.exe'
+  if (-not (Test-Path $adb)) {
+    Write-Host "`nTo install on your phone from here, add 'Android SDK Platform-Tools' in Android Studio's SDK Manager."
+  } else {
+    $lines = & $adb devices 2>$null | Select-Object -Skip 1 | Where-Object { $_ -match '\S' }
+    $ready = @($lines | Where-Object { $_ -match '\tdevice$' } | ForEach-Object { ($_ -split '\t')[0] })
+    $locked = @($lines | Where-Object { $_ -match '\tunauthorized$' })
+    if ($locked.Count -gt 0 -and $ready.Count -eq 0) {
+      Write-Host "`nA phone is plugged in but hasn't allowed USB debugging from this PC yet."
+      Write-Host "Unlock it, tap Allow on the 'Allow USB debugging?' message, then run BUILD-APK.bat again (or install $outApk by hand)."
+    } elseif ($ready.Count -eq 0) {
+      Write-Host "`nNo phone found over USB, so nothing was installed. (Plug one in with USB debugging on to install it from here.)"
+    } else {
+      foreach ($serial in $ready) {
+        $model = (& $adb -s $serial shell getprop ro.product.model 2>$null | Out-String).Trim()
+        if (-not $model) { $model = $serial }
+        $answer = Read-Host "`nInstall $outApk on ${model}? Your data on the phone is kept. (Y/n)"
+        if ($answer -match '^\s*(n|no)\s*$') { Write-Host "Not installed."; continue }
+        Write-Host "Installing on $model..."
+        $out = (& $adb -s $serial install -r $outApk 2>&1 | Out-String).Trim()
+        if ($out -match 'Success') {
+          Write-Host "Installed on $model." -ForegroundColor Green
+        } else {
+          Write-Host "Install on $model failed:`n$out" -ForegroundColor Red
+          if ($out -match 'UPDATE_INCOMPATIBLE|signatures do not match') {
+            Write-Host "The app on the phone was signed with a different key. Don't uninstall it to get past this: that deletes your data. Back up in the app first if you ever do."
+          } elseif ($out -match 'VERSION_DOWNGRADE') {
+            Write-Host "The phone has a newer version than this build."
+          } elseif ($out -match 'USER_RESTRICTED|INSTALL_CANCELED') {
+            Write-Host "The phone blocked it: check the phone for an install prompt, or turn on 'Install via USB' in Developer options."
+          }
+        }
+      }
+    }
+  }
+}
+
 # exit code for scripts that run this one (scripts\ship.ps1 in ets-web)
 if ($buildFailed) { exit 1 }
