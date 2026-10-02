@@ -2,6 +2,21 @@
 
 Every version, newest first. Training, blood tests and health need a licence; everything else is in the free edition.
 
+## 1.0.5 · 2 Oct 2026
+
+### Licence
+
+- Estimated levels calibrated to your blood tests: for testosterone, your Total testosterone results let the levels chart estimate your level in nmol/L (or ng/dL), with the lows and highs to expect on your schedule
+
+### Both editions
+
+- Half-lives of common compounds and peptides are suggested as you type a name, with a list to pick from, and filled in for compounds you already have
+- Lab test results: enter a batch's tested strength and the app changes how much you draw so your dose stays the same, and corrects doses already logged from that vial
+- New injection sites: lats, and upper and lower ventrogluteal
+- Tablet mode: on tablets, unfolded foldables and phones turned sideways, the tabs move to a rail down the left, cards sit in two columns and forms open as dialogs in the middle of the screen
+- Body map: History > Sites shows every injection site on a front and back outline, coloured by how long it has rested, with past reactions; you can also pick the site from the map when you log a dose
+- Web app: a demo with sample data (from the website's "Try the demo" button), kept apart from your own data
+
 ## 1.0.4 · 1 Oct 2026
 
 ### Licence

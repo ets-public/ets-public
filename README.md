@@ -1,6 +1,6 @@
 # Enhanced Training Studio · free edition
 
-Version **1.0.4** · 2 Oct 2026
+Version **1.0.5** · 2 Oct 2026
 
 A free Android app for your injection protocol. Everything stays on your phone.
 
@@ -19,7 +19,7 @@ Both editions get every fix, including security fixes, at the same time.
 
 ## Install
 
-Download `ETS-free-1.0.4.apk` from this repository's **Releases** page and open it on your phone. Android asks once to allow installs from your browser.
+Download `ETS-free-1.0.5.apk` from this repository's **Releases** page and open it on your phone. Android asks once to allow installs from your browser.
 
 **Upgrading to a licence:** install the licensed app over the top. Your data stays.
 
@@ -29,7 +29,7 @@ Add the app's F-Droid repository and updates arrive in F-Droid: open https://ets
 
 ## Build it yourself
 
-You need Windows, Android Studio (for the Android SDK) and Node.js. Double-click `BUILD-APK.bat`. The script fetches a private copy of Node 22 and Java 21 if needed and builds `ETS-free-1.0.4.apk`. It's signed with your own Android debug key, so it installs as a separate copy, not as an update to the release APK.
+You need Windows, Android Studio (for the Android SDK) and Node.js. Double-click `BUILD-APK.bat`. The script fetches a private copy of Node 22 and Java 21 if needed and builds `ETS-free-1.0.5.apk`. It's signed with your own Android debug key, so it installs as a separate copy, not as an update to the release APK.
 
 ## Licence
 

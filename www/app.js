@@ -207,11 +207,13 @@ const ACT_KINDS = ['run','treadmill','walk','hike'];
 
 /* ================= Storage ================= */
 async function rawGet(key){
+  if(DEMO){ if(key===STORE_KEY && !demoMem.has(key)) demoMem.set(key, JSON.stringify(demoData())); return demoMem.has(key) ? demoMem.get(key) : null; }
   const Pref = plugin('Preferences');
   if(Pref){ try{ const r = await Pref.get({key}); if(r && r.value) return r.value; }catch(e){} }
   try{ return localStorage.getItem(key); }catch(e){ return null; }
 }
 async function rawSet(key, val){
+  if(DEMO){ demoMem.set(key, val); return; }
   const Pref = plugin('Preferences');
   let ok = false;
   if(Pref){ try{ await Pref.set({key, value:val}); ok = true; }catch(e){} }
@@ -800,6 +802,143 @@ function suggestSite(route, c){
   return pool.slice().sort((a,b)=>(last[a]||0)-(last[b]||0))[0];
 }
 
+/* ================= Body map =================
+   Where each injection site sits on a simple front and back outline (viewBox 120 x 260 per view). Front view is
+   drawn facing you, so the person's right side is on your left; the back view is as you'd see their back. */
+const SITE_POS = {
+  'Delt R':['front',30,50], 'Delt L':['front',90,50],
+  'Abdomen R':['front',52,100], 'Abdomen L':['front',68,100],
+  'Love handle R':['front',37,107], 'Love handle L':['front',83,107],
+  'Ventroglute upper R':['front',37,123], 'Ventroglute upper L':['front',83,123],
+  'Ventroglute lower R':['front',41,138], 'Ventroglute lower L':['front',79,138],
+  'Quad R':['front',48,158], 'Quad L':['front',72,158],
+  'Thigh R':['front',49,182], 'Thigh L':['front',71,182],
+  'Lat L':['back',38,80], 'Lat R':['back',82,80],
+  'Glute L':['back',47,138], 'Glute R':['back',73,138],
+};
+const BODY_SHAPES = `<circle cx="60" cy="20" r="13"/><rect x="54" y="30" width="12" height="12"/>
+  <path d="M34 42 Q60 36 86 42 L92 52 L88 92 L85 120 Q60 130 35 120 L32 92 L28 52 Z"/>
+  <path d="M31 45 L20 54 L14 100 L11 140 L20 141 L24 102 L32 66 Z"/><path d="M89 45 L100 54 L106 100 L109 140 L100 141 L96 102 L88 66 Z"/>
+  <path d="M35 116 L60 123 L58 180 L56 248 L43 248 L39 182 Z"/><path d="M85 116 L60 123 L62 180 L64 248 L77 248 L81 182 Z"/>`;
+/* rest state from days since last use: just used (0-2 days), resting (3-6), rested (7+ or never) */
+function siteRest(t){
+  if(!t) return {k:'rested', label:'Not used yet', days:null};
+  const d = diffDays(new Date(), t);
+  return d <= 2 ? {k:'recent', label: d===0 ? 'Used today' : d===1 ? 'Used yesterday' : `Used ${d} days ago`, days:d}
+       : d <= 6 ? {k:'resting', label:`Used ${d} days ago`, days:d}
+       : {k:'rested', label:`Used ${d} days ago`, days:d};
+}
+const ROUTE_NAME = {IM:'Intramuscular', SubQ:'Subcutaneous'};
+const siteRoute = s => SITES.SubQ.includes(s) ? 'SubQ' : SITES.IM.includes(s) ? 'IM' : null;
+/* the last use of every site, across every compound (a site needs rest whatever went into it) */
+function siteLastUse(){
+  const last = {};
+  db.logs.forEach(l=>{ if(l.site && !l.skipped){ const t = +new Date(l.date); if(!last[l.site] || t > last[l.site]) last[l.site] = t; } });
+  return last;
+}
+/* sites: [{name, rest, inRot, sug, sel}]  ->  front and back views side by side */
+function bodyMapSvg(sites, opts={}){
+  const views = ['front','back'].map(v=>{
+    const here = sites.filter(x=>SITE_POS[x.name] && SITE_POS[x.name][0]===v);
+    const dots = here.map(x=>{
+      const [,cx,cy] = SITE_POS[x.name];
+      const cls = ['bm-site', 'bm-'+x.rest.k, x.inRot ? '' : 'bm-out', x.sel ? 'bm-sel' : ''].join(' ');
+      const label = `${x.name}: ${x.rest.label}${x.inRot ? '' : ', not in your rotation'}${x.sug ? ', suggested next' : ''}${x.sel ? ', selected' : ''}`;
+      return `<g class="${cls}" role="button" tabindex="0"${opts.pick ? '' : ' data-action="site-open"'} data-s="${esc(x.name)}" aria-label="${esc(label)}">
+        <title>${esc(label)}</title><circle class="bm-hit" cx="${cx}" cy="${cy}" r="10"/>${x.sug ? `<circle class="bm-sug" cx="${cx}" cy="${cy}" r="10.5"/>` : ''}<circle class="bm-dot" cx="${cx}" cy="${cy}" r="6.5"/></g>`;
+    }).join('');
+    // which side is which: front view mirrors (their right on your left)
+    const [lt, rt] = v==='front' ? ['R','L'] : ['L','R'];
+    return `<figure class="bm-view"><svg viewBox="0 0 120 262" aria-hidden="false" role="group" aria-label="${v==='front'?'Front':'Back'} of the body">
+      <g class="bm-outline">${BODY_SHAPES}</g><g class="bm-fill">${BODY_SHAPES}</g>
+      <text x="6" y="258" class="bm-side">${lt}</text><text x="114" y="258" class="bm-side" text-anchor="end">${rt}</text>${dots}</svg>
+      <figcaption>${v==='front'?'Front':'Back'}</figcaption></figure>`;
+  }).join('');
+  return `<div class="bm">${views}</div>`;
+}
+const BM_LEGEND = `<div class="bm-legend"><span><i class="bm-k-recent"></i>Used in the last 2 days</span><span><i class="bm-k-resting"></i>Resting (3–6 days)</span><span><i class="bm-k-rested"></i>Rested (7+ days)</span><span><i class="bm-k-sug"></i>Suggested next</span><span><i class="bm-k-out"></i>Not in your rotation</span></div>`;
+/* the injectable compounds the Sites view is about: the History filter's, else everything injected in your protocol */
+function siteViewCompounds(){
+  const inj = db.compounds.filter(c=>!isOral(c) && inProtocol(c));
+  if(ui.histFilter && ui.histFilter!=='all' && ui.histFilter!=='removed'){ const c = db.compounds.find(x=>x.id===ui.histFilter); return c && !isOral(c) ? [c] : []; }
+  return inj;
+}
+function siteStates(comps, opts={}){
+  const routes = comps.length ? [...new Set(comps.map(c=>c.route==='SubQ' ? 'SubQ' : 'IM'))] : ['IM','SubQ'];
+  const last = siteLastUse();
+  const sug = new Set(opts.noSug ? [] : comps.map(c=>suggestSite(c.route==='SubQ' ? 'SubQ' : 'IM', c)));
+  const rot = new Set(comps.flatMap(c=>sitesFor(c)));
+  return routes.flatMap(r=>SITES[r].map(name=>({name, route:r, rest:siteRest(last[name]), inRot: !comps.length || rot.has(name), sug: sug.has(name), sel: opts.sel===name})));
+}
+function renderSites(){
+  const comps = siteViewCompounds();
+  const st = siteStates(comps);
+  const byRoute = r => st.filter(x=>x.route===r);
+  const reacts = siteReactions();
+  const row = x => {
+    const n = (reacts[x.name] || []).length;
+    const tag = x.rest.k==='recent' ? '<span class="tag tag-due">Resting</span>' : x.sug ? '<span class="tag tag-ok">Next</span>' : '';
+    return `<div class="list-item tap-row" data-action="site-open" data-s="${esc(x.name)}">
+      <span class="bm-chip bm-${x.rest.k}${x.inRot ? '' : ' bm-out'}" aria-hidden="true"></span>
+      <div class="list-main"><div class="list-title">${esc(x.name)}</div>
+        <div class="list-sub">${esc(x.rest.label)}${x.inRot ? '' : ' · not in your rotation'}${n ? ` · ${n} reaction${n===1?'':'s'} noted` : ''}</div></div>${tag}</div>`;
+  };
+  let html = comps.length ? '' : `<p class="small muted">Sites for every route. Add an injectable compound to see its rotation.</p>`;
+  html += `<div class="card bm-card">${bodyMapSvg(st)}${BM_LEGEND}</div>`;
+  for(const r of ['IM','SubQ']){ const list = byRoute(r); if(list.length) html += `<div class="section-label">${ROUTE_NAME[r]}</div><div class="card">${list.map(row).join('')}</div>`; }
+  // sites logged by name that aren't on the map (older names or ones typed in a backup)
+  const known = new Set([...SITES.IM, ...SITES.SubQ]);
+  const other = [...new Set(db.logs.filter(l=>l.site && !l.skipped && !known.has(l.site)).map(l=>l.site))];
+  if(other.length){
+    const last = siteLastUse();
+    html += `<div class="section-label">Other sites in your log</div><div class="card">${other.map(s=>`<div class="list-item tap-row" data-action="site-open" data-s="${esc(s)}"><div class="list-main"><div class="list-title">${esc(s)}</div><div class="list-sub">${esc(siteRest(last[s]).label)}</div></div></div>`).join('')}</div>`;
+  }
+  return html + `<p class="small muted">A site needs a few days to recover. The suggestion picks the one in your rotation that's rested longest. Note a sore spot or lump in the daily check-in and it shows here.</p>`;
+}
+/* site reactions from check-ins, by the site of the injection they were linked to */
+function siteReactions(){
+  const out = {}, byId = {};
+  db.logs.forEach(l=>{ byId[l.id] = l; });
+  (db.checkins||[]).forEach(x=>{
+    if(!x.site || !x.site.issues || !x.site.issues.length) return;
+    const l = byId[x.site.logId]; if(!l || !l.site) return;
+    (out[l.site] = out[l.site] || []).push({date:x.date, issues:x.site.issues, log:l});
+  });
+  Object.values(out).forEach(a=>a.sort((p,q)=>p.date<q.date?1:-1));
+  return out;
+}
+function openSiteSheet(name){
+  const route = siteRoute(name);
+  const uses = db.logs.filter(l=>l.site===name && !l.skipped).sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const rest = siteRest(uses[0] ? +new Date(uses[0].date) : null);
+  const reacts = siteReactions()[name] || [];
+  const byId = {}; db.compounds.forEach(c=>{ byId[c.id] = c; });
+  const comps = route ? db.compounds.filter(c=>!isOral(c) && inProtocol(c) && (c.route==='SubQ' ? 'SubQ' : 'IM')===route) : [];
+  const restText = rest.k==='recent' ? 'Give it a few more days before using it again.' : rest.k==='resting' ? 'Resting. Fine to use if your other sites are busier.' : 'Rested and ready.';
+  const draw = () => {
+    const html = `<h2>${esc(name)}</h2>
+      <p class="muted" style="margin-top:-8px">${route ? ROUTE_NAME[route] : 'Not on the body map'} · ${esc(rest.label)}${uses[0] ? `, ${esc(fmtDate(uses[0].date))}` : ''}</p>
+      <p class="small">${restText}</p>
+      <div class="section-label">Last uses</div>
+      <div class="card">${uses.length ? uses.slice(0,5).map(l=>`<div class="kv"><span>${esc(fmtDate(l.date))}</span><span>${esc((byId[l.compoundId] && byId[l.compoundId].name) || l.compoundName || '')} · ${esc(fmtAmt(l.dose, l.unit))}</span></div>`).join('') : '<div class="empty">Not used yet.</div>'}</div>
+      <div class="section-label">Reactions</div>
+      <div class="card">${reacts.length ? reacts.slice(0,8).map(r=>`<div class="kv"><span>${esc(fmtShortY(parseYmd(r.date)))}</span><span>${esc(r.issues.map(siteIssueLabel).join(', '))} · injected ${esc(fmtShort(r.log.date))}</span></div>`).join('') : '<p class="small muted" style="margin:0">None noted. If a site is sore, lumpy or red, note it in the daily check-in.</p>'}</div>
+      ${comps.length ? `<div class="section-label">In your rotation</div><div class="card">${comps.map(c=>`<div class="switch-row"><div class="list-title">${esc(c.name)}</div>
+        <label class="switch"><input type="checkbox" data-rot="${esc(c.id)}" ${sitesFor(c).includes(name)?'checked':''} aria-label="${esc(name)} in the ${esc(c.name)} rotation"><span></span></label></div>`).join('')}
+        <div class="form-err" id="siteErr" role="alert" style="min-height:0"></div></div>` : ''}`;
+    openSheet(html);
+    document.querySelectorAll('#sheetRoot [data-rot]').forEach(inp=>inp.addEventListener('change', ()=>{
+      const c = db.compounds.find(x=>x.id===inp.dataset.rot); if(!c) return;
+      const cur = sitesFor(c), r = c.route==='SubQ' ? 'SubQ' : 'IM';
+      const next = inp.checked ? SITES[r].filter(s=>cur.includes(s) || s===name) : cur.filter(s=>s!==name);
+      if(!next.length){ inp.checked = true; $('#siteErr').textContent = 'A rotation needs at least one site.'; return; }
+      c.sites = next; save(); render();
+      toast(inp.checked ? `${name} added to the ${c.name} rotation` : `${name} taken out of the ${c.name} rotation`);
+    }));
+  };
+  draw();
+}
+
 /* ================= Edition & sections =================
    Two editions are built from this file. Code between the premium markers (training, labs, health) is left out
    of the free edition entirely by scripts/make-edition.mjs; code between the free markers is left out of the premium one.
@@ -975,7 +1114,7 @@ function render(){
     html = (renderSetup()) + appSettingsLink();
   }
   
-  html = webUpdateBannerHtml() + html;
+  html = demoBannerHtml() + webUpdateBannerHtml() + html;
   // tablet mode: screens made of separate cards can sit in two columns when the screen is wide enough (styles.css);
   // lists read in date order (History) and step-by-step screens (a running workout, the calendar) stay in one
   const live = (ui.tab==='workout' && (curWkSafe() || db.activeActivity)) || (ui.tab==='templates' && ui.tplEdit);
@@ -1236,6 +1375,33 @@ function niceMax(v){
   const p = 10**Math.floor(Math.log10(v)), n = v/p;
   return (n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10)*p;
 }
+/* ================= Levels calibrated to blood tests (licence) =================
+   The levels model gives mg still active. For testosterone, logged Total testosterone results turn that into an
+   estimate in the lab's units: each result divided by the model's estimate at the time the blood was taken gives a
+   scale, and the average scale converts the curve. It's an estimate, never a result, and it gives no dosing advice.
+   Rules: results in nmol/L or ng/dL (1 nmol/L = 28.84 ng/dL); at least 2 half-lives of logged doses before the
+   test (so the estimate has built up); a test without a time is taken as 7 am (blood tests are usually morning,
+   before that day's dose); tests within a day of an injection are near a peak, which the simple model gets wrong
+   (oil peaks over 1-3 days), so they're used only when there's no other test. The last 4 usable tests count. */
+const T_ESTERS = new Set(['Testosterone cypionate','Testosterone enanthate','Testosterone propionate','Testosterone undecanoate (injection)']);
+function levelCalib(c){ return null; }
+
+const fmtLab = (v, unit) => unit==='ng/dL' ? String(Math.round(v)) : String(v >= 10 ? Math.round(v) : round(v, 1));
+/* the words under the chart (and in the doctor report) for a calibrated chart */
+function calibText(S, cal){
+  if(!cal) return '';
+  if(!cal.ok) return cal.why==='none' ? 'Add your Total testosterone blood test results and this chart can also estimate your level in nmol/L.'
+    : 'Your Total testosterone results were taken before 2 half-lives of logged doses, so they can’t calibrate this chart yet.';
+  const fut = S.pts.filter(p=>p.v!=null && p.t > S.now + DAY/2);
+  const u = cal.unit, now = S.nowV*cal.f;
+  let t = `Calibrated to ${cal.n === 1 ? 'your blood test' : `your ${cal.n} blood tests`}: about ${fmtLab(now, u)} ${u} now`;
+  if(cal.n > 1 && cal.spread > 0.05) t += ` (${fmtLab(S.nowV*cal.lo, u)}–${fmtLab(S.nowV*cal.hi, u)} going by each test)`;
+  if(fut.length > 4){ const vs = fut.map(p=>p.v); t += `. On your current schedule, lows around ${fmtLab(Math.min(...vs)*cal.f, u)} and highs around ${fmtLab(Math.max(...vs)*cal.f, u)} ${u}`; }
+  t += '. An estimate from the model, not a blood result.';
+  if(cal.spread > 0.3) t += ` Your tests don’t agree closely (${Math.round(cal.spread*100)}% apart): a different lab, test time or product strength can do this, so treat these numbers loosely.`;
+  if(cal.onlyPeak) t += ' Your tests were taken within a day of an injection, near a peak: a test just before a dose calibrates this better.';
+  return t;
+}
 /* Paint the levels chart onto any canvas (the live chart, or an off-screen one for the PDF report). */
 function paintLevels(cv, c, weeks, W, H, dpr, col, MONO){
   cv.width = W*dpr; cv.height = H*dpr;
@@ -1244,7 +1410,8 @@ function paintLevels(cv, c, weeks, W, H, dpr, col, MONO){
   const S = levelSeries(c, weeks);
   const unit = c.unit;
   const maxV = niceMax(Math.max(1e-9, ...S.pts.filter(p=>p.v!=null).map(p=>p.v))*1.1);
-  const pad = {l:44, r:10, t:26, b:24};
+  const cal = levelCalib(c), C = cal && cal.ok ? cal : null;
+  const pad = {l:44, r: C ? 50 : 10, t:26, b:24};   // room for the level axis, and the check-in scale outside it
   const x = t => pad.l + (t-S.start)/(S.end-S.start)*(W-pad.l-pad.r);
   const y = v => H - pad.b - v/maxV*(H-pad.t-pad.b);
   g.font = `10px ${MONO}`;
@@ -1255,7 +1422,9 @@ function paintLevels(cv, c, weeks, W, H, dpr, col, MONO){
     const v = maxV*i/4, yy = Math.round(y(v))+0.5;
     g.beginPath(); g.moveTo(pad.l, yy); g.lineTo(W-pad.r, yy); g.stroke();
     g.fillText(fmtAmt(v, unit).replace(/ (mg|mcg|g|IU)$/, ''), pad.l-6, yy);
+    if(C && i){ g.textAlign='left'; g.fillText('~'+fmtLab(v*C.f, C.unit), W-pad.r+5, yy); g.textAlign='right'; }
   }
+  if(C){ g.textAlign='right'; g.textBaseline='alphabetic'; g.fillText(C.unit, W-2, H-pad.b+14 > H-2 ? H-2 : H-pad.b+14); g.textBaseline='middle'; }
   g.textAlign='right'; g.textBaseline='alphabetic'; g.fillText(uL(unit), pad.l-6, 12); g.textBaseline='middle';
   // x labels weekly
   g.textAlign='center'; g.textBaseline='alphabetic';
@@ -1308,7 +1477,7 @@ function paintLevels(cv, c, weeks, W, H, dpr, col, MONO){
     g.fillStyle = signal; g.fillText('LAB', mx, Math.max(pad.t+8, my-9));
     return {tst, v, mx, my};
   });
-  return {S, x, y, pad, W, H, unit, marks, c};
+  return {S, x, y, pad, W, H, unit, marks, c, cal};
 }
 function drawLevels(){
   const cv = $('#levels'); if(!cv) return;
@@ -1320,10 +1489,12 @@ function drawLevels(){
   chartState.feel = drawFeelOverlay(cv, chartState, col);
   const {marks, unit} = chartState;
   const doses = db.logs.filter(l=>l.compoundId===c.id && !l.skipped).length;
-  let note = `Estimate from your ${doses} logged ${doses===1?'dose':'doses'} and a ${c.halfLife}-day half-life. Dashed line = planned doses. It shows amount remaining, not a blood level.`;
+  const cal = chartState.cal;
+  let note = `Estimate from your ${doses} logged ${doses===1?'dose':'doses'} and a ${c.halfLife}-day half-life. Dashed line = planned doses.${cal && cal.ok ? ' Left axis: amount remaining; right axis: estimated level.' : ' It shows amount remaining, not a blood level.'}`;
+  const ct = calibText(chartState.S, cal);
   const lines = marks.map(({tst, v})=>`<div class="lab-note"><b>Blood test ${esc(fmtShort(tst.at))}</b> · ${esc(labTimingText(tst.at, c) || 'no dose logged before it')}${v!=null?` · est. ${esc(fmtEst(v, unit))} active`:''}${tst.key?` · ${esc(tst.key.marker)} ${esc(labValueText(tst.key))} ${esc(tst.key.unit||'')}${tst.key.flag?` (${esc(tst.key.flag)})`:''}`:''}</div>`);
   const hidden = !marks.length && labTests().some(t=>t.at < chartState.S.start) && ui.chartWeeks < 52;
-  $('#chartNote').innerHTML = esc(note) + lines.join('') + (hidden ? `<div style="margin-top:8px"><button class="btn btn-outline" data-action="chart-weeks" data-w="52">Show blood tests (1 year)</button></div>` : '');
+  $('#chartNote').innerHTML = esc(note) + (ct ? `<div class="calib-note${cal.ok ? '' : ' muted'}">${esc(ct)}</div>` : '') + lines.join('') + (hidden ? `<div style="margin-top:8px"><button class="btn btn-outline" data-action="chart-weeks" data-w="52">Show blood tests (1 year)</button></div>` : '');
 }
 function chartHover(ev){
   if(!chartState) return;
@@ -1345,7 +1516,8 @@ function chartHover(ev){
   if(!best){ tip.hidden = true; return; }
   tip.hidden = false;
   const ci = chartState.feel && chartState.feel.length ? checkinOn(ymd(new Date(best.t))) : null;
-  tip.innerHTML = `${fmtShort(best.t)}${best.t>S.now?' (planned)':''}<br><i style="background:var(--signal)"></i><b>${fmtEst(best.v, chartState.unit)}</b>${ci ? `<br>Felt: ${esc(checkinText(ci))}` : ''}`;
+  const C = chartState.cal && chartState.cal.ok ? chartState.cal : null;
+  tip.innerHTML = `${fmtShort(best.t)}${best.t>S.now?' (planned)':''}<br><i style="background:var(--signal)"></i><b>${fmtEst(best.v, chartState.unit)}</b>${C ? ` · ~${fmtLab(best.v*C.f, C.unit)} ${C.unit}` : ''}${ci ? `<br>Felt: ${esc(checkinText(ci))}` : ''}`;
   tip.style.left = Math.min(Math.max(x(best.t), 60), W-60)+'px';
   tip.style.top = (y(best.v)-10)+'px';
 }
@@ -1437,7 +1609,19 @@ function renderHistory(){
   const ids = new Set(db.compounds.map(c=>c.id));
   if(ui.histFilter!=='all' && ui.histFilter!=='removed' && !ids.has(ui.histFilter)) ui.histFilter='all';
   const hasRemoved = db.logs.some(l=>!ids.has(l.compoundId));
-  let html = `<div class="chips">
+  const hasInj = db.compounds.some(c=>!isOral(c));
+  if(!hasInj) ui.histView = 'doses';
+  const viewTabs = hasInj ? `<div class="chips hist-view" role="group" aria-label="Show">
+    <button class="chip ${ui.histView!=='sites'?'active':''}" data-action="hist-view" data-v="doses" aria-pressed="${ui.histView!=='sites'}">Doses</button>
+    <button class="chip ${ui.histView==='sites'?'active':''}" data-action="hist-view" data-v="sites" aria-pressed="${ui.histView==='sites'}">Sites</button></div>` : '';
+  if(ui.histView==='sites'){
+    // the compound filter: injectables only (the map is about injection sites)
+    const injIds = new Set(db.compounds.filter(c=>!isOral(c)).map(c=>c.id));
+    if(ui.histFilter!=='all' && !injIds.has(ui.histFilter)) ui.histFilter = 'all';
+    const injC = db.compounds.filter(c=>!isOral(c) && (inProtocol(c) || db.logs.some(l=>l.compoundId===c.id)));
+    return viewTabs + (injC.length > 1 ? `<div class="chips"><button class="chip ${ui.histFilter==='all'?'active':''}" data-action="hist-filter" data-f="all">All</button>${injC.map(c=>`<button class="chip ${ui.histFilter===c.id?'active':''}" data-action="hist-filter" data-f="${esc(c.id)}">${esc(c.name)}</button>`).join('')}</div>` : '') + renderSites();
+  }
+  let html = viewTabs + `<div class="chips">
     <button class="chip ${ui.histFilter==='all'?'active':''}" data-action="hist-filter" data-f="all">All</button>
     ${db.compounds.filter(c=>inProtocol(c) || db.logs.some(l=>l.compoundId===c.id)).map(c=>`<button class="chip ${ui.histFilter===c.id?'active':''}" data-action="hist-filter" data-f="${esc(c.id)}">${esc(c.name)}</button>`).join('')}
     ${hasRemoved?`<button class="chip ${ui.histFilter==='removed'?'active':''}" data-action="hist-filter" data-f="removed">Removed</button>`:''}
@@ -1582,6 +1766,104 @@ function appSettingsLink(){
 }
 /* Version and edition come from build-info.js, which the build script writes. The free edition is an older version published on GitHub. */
 const BUILD = Object.assign({ version: 'dev', edition: 'premium', siteUrl: '' }, window.ETS_BUILD || {});
+/* ================= Demo (the website's "Try it" button) =================
+   app.<domain>/?demo opens the web app with made-up sample data, kept only in memory: nothing is read from or
+   written to this browser's storage, so a real log on the same phone is never touched, and a reload starts the
+   demo fresh. Licensed sections are open (it's a showroom, and nothing persists); backups, exports, Calendar
+   reminders, photos and licence keys are switched off. */
+const DEMO = (()=>{ try{ return (BUILD.platform === 'web' || BUILD.version === 'dev') && /[?&]demo(=[^&]*)?(&|$)/.test(location.search); }catch(e){ return false; } })();
+const demoMem = new Map();
+const DEMO_BLOCK = {
+  'export':'backups', 'import':'restoring a backup', 'backup-now':'backups', 'backup-pass':'backups', 'cal-export':'Calendar reminders',
+  'gd-signin':'Google Drive', 'gd-backup':'Google Drive', 'gd-restore':'Google Drive', 'photo-add':'progress photos',
+  'lic-enter':'licence keys', 'lic-recheck':'licence keys', 'lic-remove':'licence keys',
+};
+function demoBannerHtml(){
+  if(!DEMO) return '';
+  return `<div class="demo-banner" role="note"><span><b>Demo:</b> sample data. Nothing you do here is saved.</span><button type="button" data-action="demo-exit">Exit demo</button></div>`;
+}
+/* sample data, dated from today: 12 weeks of TRT (testosterone cypionate twice a week), an AI and a supplement,
+   three blood tests, check-ins, a site reaction, stock, and 8 weeks of training */
+function demoData(){
+  let seed = 20261002;
+  const rnd = () => { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const pick = (a, b) => a + Math.round(rnd() * (b - a));
+  const today = new Date(); today.setHours(0,0,0,0);
+  const at = (d, h, m=0) => { const x = new Date(d); x.setHours(h, m, 0, 0); return x.toISOString(); };
+  const start = addDays(today, -84);
+  const testSites = ['Glute L','Glute R','Ventroglute upper L','Ventroglute upper R','Delt L','Delt R'];
+  const logs = [], checkins = [], labs = [];
+  let si = 0, opened = addDays(today, -28), testSinceOpen = 0, aiSinceOpen = 0;
+  for(let d = new Date(start); d < today; d = addDays(d, 1)){
+    const dow = d.getDay();
+    if(dow===1 || dow===4){
+      logs.push({id:'dt'+ymd(d), compoundId:'demoTest', compoundName:'Testosterone cypionate', dose:70, strength:250, unit:'mg', volumeMl:0.28, date:at(d, 7, pick(40, 59)), site:testSites[si++ % testSites.length]});
+      if(d >= opened) testSinceOpen++;
+      logs.push({id:'da'+ymd(d), compoundId:'demoAI', compoundName:'Anastrozole', dose:0.5, strength:1, unit:'mg', volumeMl:0.5, date:at(d, 20, 5)});
+      if(d >= opened) aiSinceOpen++;
+    }
+    if(diffDays(today, d) > 0) logs.push({id:'dv'+ymd(d), compoundId:'demoD3', compoundName:'Vitamin D3', dose:5000, strength:5000, unit:'iu', volumeMl:1, date:at(d, 8, 10)});
+  }
+  // a sore spot noted the day after one injection, about 10 days ago
+  const sore = logs.filter(l=>l.compoundId==='demoTest').slice(-3)[0];
+  const soreDay = sore ? ymd(addDays(new Date(sore.date), 1)) : null;
+  for(let i = 34; i >= 1; i--){
+    const day = ymd(addDays(today, -i));
+    if(rnd() < 0.18 && day !== soreDay) continue;
+    const x = {date:day, energy:pick(3,5), mood:pick(3,5), libido:pick(3,5), sleepQ:pick(3,4), site:null, note:''};
+    if(day === soreDay) x.site = {logId:sore.id, issues:['sore','lump']};
+    checkins.push(x);
+  }
+  // blood tests on a dose morning, before the injection (a trough): a baseline before TRT, then two on it
+  const thu = n => { let d = addDays(today, -n); while(d.getDay()!==4) d = addDays(d, -1); return ymd(d); };
+  const lab = (date, marker, value, unit, lo, hi) => labs.push({id:`dl-${date}-${marker}`, marker, value, unit, refLow:lo, refHigh:hi, date, time:'07:00', panel:'Male hormone panel'});
+  const base = ymd(addDays(start, -5)), mid = thu(42), last = thu(5);
+  [[base, 9.8, 210, 82, 45, 31], [mid, 19.6, 420, 104, 46, 29], [last, 21.4, 455, 118, 48, 28]].forEach(([d, tt, ft, e2, hct, shbg])=>{
+    lab(d, 'Total testosterone', tt, 'nmol/L', 8.6, 29); lab(d, 'Free testosterone', ft, 'pmol/L', 200, 650);
+    lab(d, 'Oestradiol (E2)', e2, 'pmol/L', 40, 160); lab(d, 'Haematocrit', hct, '%', 40, 52); lab(d, 'SHBG', shbg, 'nmol/L', 18, 54);
+  });
+  lab(last, 'PSA', 0.8, 'µg/L', 0, 4);
+  // training: push, pull, legs three times a week for 8 weeks, slowly getting stronger; treadmill twice a week
+  const ex = ['Bench press','Overhead press','Incline dumbbell press','Triceps pushdown','Deadlift','Barbell row','Lat pulldown','Bicep curl','Squat','Romanian deadlift','Leg press','Leg curl'].map((name, i)=>({id:'dx'+i, name}));
+  const exId = n => ex.find(e=>e.name===n).id;
+  const plans = [['Push', [['Bench press',4,8,80,1.25],['Overhead press',3,8,47.5,0.5],['Incline dumbbell press',3,10,28,0.5],['Triceps pushdown',3,12,30,0.5]]],
+                 ['Pull', [['Deadlift',3,5,150,2.5],['Barbell row',4,8,72.5,1.25],['Lat pulldown',3,10,62.5,1.25],['Bicep curl',3,12,14,0.25]]],
+                 ['Legs', [['Squat',4,6,115,2.5],['Romanian deadlift',3,8,95,1.25],['Leg press',3,12,180,5],['Leg curl',3,12,45,1.25]]]];
+  const templates = plans.map(([name, items], i)=>({id:'dtp'+i, name, items:items.map(([n,sets,reps])=>({exId:exId(n), sets, reps, restSec:n==='Deadlift'||n==='Squat' ? 180 : 90}))}));
+  const workouts = [], activities = [];
+  for(let w = 8; w >= 1; w--){
+    [[1,0],[3,1],[5,2]].forEach(([dow, pi])=>{
+      const d = addDays(today, -w*7 + (dow - today.getDay())); if(d >= today) return;
+      const wk = 8 - w, [name, items] = plans[pi];
+      const s0 = new Date(d); s0.setHours(17, pick(30,50), 0, 0);
+      workouts.push({id:`dw${w}-${dow}`, name, templateId:templates[pi].id, start:s0.toISOString(), end:new Date(+s0 + pick(52,68)*60000).toISOString(),
+        items:items.map(([n,sets,reps,w0,inc])=>({exId:exId(n), name:n, restSec:null, sets:Array.from({length:sets}, (_, k)=>({w: w0 + inc*wk, r: Math.max(1, reps - (k===sets-1 && rnd()<0.4 ? 1 : 0)), done:true}))}))});
+    });
+    [2,6].forEach(dow=>{
+      const d = addDays(today, -w*7 + (dow - today.getDay())); if(d >= today) return;
+      const s0 = new Date(d); s0.setHours(6, 30, 0, 0); const mins = pick(25, 35);
+      activities.push({id:`dr${w}-${dow}`, kind:'treadmill', name:'Treadmill run', start:s0.toISOString(), end:new Date(+s0 + mins*60000).toISOString(), elapsedSec:mins*60, movingSec:mins*60, distanceM:Math.round(mins*165 + rnd()*300), elevGainM:0, route:[]});
+    });
+  }
+  const health = {days:{}};
+  for(let i = 60; i >= 1; i--) health.days[ymd(addDays(today, -i))] = {restingHeartRate:pick(57,63), hrv:pick(44,60), sleepMin:pick(395,480), steps:pick(6500,12500)};
+  const exp = ymd(addDays(today, 420));
+  const out = {
+    compounds:[
+      {id:'demoTest', name:'Testosterone cypionate', strength:250, unit:'mg', route:'IM', schedule:{type:'weekly', days:[1,4]}, time:'morning', dosePerInj:70, halfLife:8, barrel:'1 mL', sites:testSites, hlChecked:true,
+        vial:{sizeMl:10, remainingMl:Math.round((10 - testSinceOpen*0.28)*100)/100, openedAt:opened.toISOString(), price:95, batch:'TC-2408', expiry:exp},
+        stock:[{id:'ds1', count:2, sizeMl:10, strength:250, price:95, batch:'TC-2408', expiry:exp}]},
+      {id:'demoAI', name:'Anastrozole', form:'oral', piece:'tablet', strength:1, unit:'mg', route:'Oral', schedule:{type:'weekly', days:[1,4]}, time:'night', dosePerInj:0.5, halfLife:1.9, hlChecked:true,
+        vial:{sizeMl:30, remainingMl:30 - aiSinceOpen*0.5, openedAt:opened.toISOString(), price:24}},
+      {id:'demoD3', name:'Vitamin D3', form:'oral', piece:'softgel', supplement:true, strength:5000, unit:'iu', route:'Oral', schedule:{type:'interval', every:1, start:ymd(start)}, time:'morning', dosePerInj:5000, hlChecked:true},
+    ],
+    logs, labs, checkins, health, exercises:ex, templates, workouts, activities,
+    measures:[{id:'dm1', date:ymd(addDays(today,-56)), waist:88, chest:106, arm:38.5}, {id:'dm2', date:ymd(addDays(today,-28)), waist:87, chest:107, arm:39}, {id:'dm3', date:ymd(addDays(today,-3)), waist:86, chest:108, arm:39.5}],
+    settings:{mode:'inj', checkin:true, currency:'$', lastBackupAt:new Date().toISOString(), installHintOff:true, calNudgeOff:true, trSeeded:true, tplSeeded:true},
+  };
+  
+  return out;
+}
 function siteLink(path){ const u = String(BUILD.siteUrl||''); return /^https:\/\/[\w.-]+\.[a-z]{2,}$/i.test(u) && !/example\.com$/i.test(u) ? u + path : ''; }
 /* ================= Web app (iPhone and browsers) =================
    The same app, installed from Safari to the Home Screen. Android-only parts (watch data, Bluetooth, GPS,
@@ -2324,7 +2606,7 @@ function openLogSheet(opts={}){
       <div class="field"><label for="lDate">Date &amp; time</label><input id="lDate" type="datetime-local" value="${toLocalInput(when)}"></div>
     </div>
     <div class="calc" id="lCalc"></div>
-    <div class="field" id="lSiteF"><span class="field-label">Injection site</span><div class="site-grid" id="lSites"></div></div>
+    <div class="field" id="lSiteF"><div class="field-label site-head"><span>Injection site</span><button type="button" class="link-btn" id="lMapBtn" aria-expanded="false">Body map</button></div><div class="bm-pick" id="lMap" hidden></div><div class="site-grid" id="lSites"></div></div>
     <div class="field"><label for="lNotes">Notes</label><textarea id="lNotes" placeholder="${c && isOral(c) ? 'Side effects, how you feel…' : 'Side effects, how you feel, site pain…'}">${esc(ex?ex.notes||'':'')}</textarea></div>
     <div class="sheet-actions"><button class="btn btn-block" id="lSave">${ex?'Save changes':'Save dose'}</button><div class="form-err" id="lErr" role="alert" style="margin-top:6px; min-height:0"></div></div>
     ${ex?`<button class="btn btn-danger btn-block" style="margin-top:10px" id="lDel">Delete entry</button>`:''}
@@ -2347,7 +2629,26 @@ function openLogSheet(opts={}){
       const ago = last[s] ? `${diffDays(new Date(), last[s])}d ago` : 'Not used yet';
       return `<button type="button" class="opt ${s===site?'active':''} ${s===sug?'suggest':''} ${mine.includes(s)?'':'other-site'}" data-s="${esc(s)}">${esc(s)}<span class="sub">${s===sug?'Suggested · ':''}${ago}</span></button>`;
     }).join('');
+    drawMap();
   };
+  // the body map in the sheet picks a site too (same choice as the list under it)
+  const drawMap = ()=>{
+    if(f('lMap').hidden || !c || isOral(c)) return;
+    const st = siteStates([c], {sel: site}).filter(x=>x.route===(c.route==='SubQ' ? 'SubQ' : 'IM'));
+    f('lMap').innerHTML = bodyMapSvg(st, {pick:true}) + BM_LEGEND;
+  };
+  f('lMapBtn').addEventListener('click', ()=>{
+    const open = f('lMap').hidden; f('lMap').hidden = !open; f('lMapBtn').setAttribute('aria-expanded', String(open));
+    f('lMapBtn').textContent = open ? 'Hide map' : 'Body map'; drawMap();
+  });
+  const pickFromMap = e=>{
+    const g = e.target.closest('.bm-site'); if(!g) return;
+    if(e.type==='keydown' && e.key!=='Enter' && e.key!==' ') return;
+    e.preventDefault(); e.stopPropagation();
+    site = g.dataset.s; renderSites();
+  };
+  f('lMap').addEventListener('click', pickFromMap);
+  f('lMap').addEventListener('keydown', pickFromMap);
   const prefill = ()=>{
     if(ex){ f('lDose').value = round(fromMg(ex.dose, unitOf()), 3); return; }
     const last = db.logs.filter(l=>l.compoundId===cid && !l.skipped).sort((a,b)=>new Date(b.date)-new Date(a.date))[0];
@@ -3611,6 +3912,7 @@ function buildReport(jsPDF, opts){
         doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...INK);
         doc.text(`${c.name}  ·  half-life ${c.halfLife} d`, M, y+3); y += 5;
         doc.addImage(img, 'PNG', M, y, CW, h); y += h + 2;
+        if(cs.cal && cs.cal.ok) para(calibText(cs.S, cs.cal) + ' Right axis: estimated level.', 7.8, INK);
         cs.marks.forEach(mk=>{
           const k = mk.tst.key;
           para(`Blood test ${fmtD(mk.tst.at)}: ${labTimingText(mk.tst.at, c) || 'no dose logged before it'}${mk.v!=null?`, est. ${fmtEst(mk.v, c.unit)} active`:''}${k?`, ${k.marker} ${labValueText(k)} ${k.unit||''}${k.flag?' ('+k.flag+')':''}`:''}.`, 7.8, INK);
@@ -3725,6 +4027,7 @@ function buildReport(jsPDF, opts){
     doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...MUTED);
     doc.text('Enhanced Training Studio · all data entered by the patient · estimates are not measured blood levels', M, 297-8);
     doc.text(`Page ${i} of ${pages}`, W-M, 297-8, {align:'right'});
+    if(DEMO){ doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(200,64,27); doc.text('SAMPLE DATA · DEMO REPORT · NOT A REAL PATIENT', W/2, 8, {align:'center'}); }
   }
   return doc;
 }
@@ -3986,6 +4289,8 @@ document.addEventListener('click', e=>{
   if(modeBtn){ setMode(modeBtn.dataset.mode); return; }
   const a = e.target.closest('[data-action]'); if(!a || !a.dataset.action) return;
   const id = a.dataset.id;
+  if(DEMO && DEMO_BLOCK[a.dataset.action]){ toast(`Not in the demo: ${DEMO_BLOCK[a.dataset.action]} work in the app itself.`); return; }
+  if(a.dataset.action==='demo-exit'){ location.replace(location.pathname); return; }
   
   switch(a.dataset.action){
     case 'log': openLogSheet({compoundId:id, day:a.dataset.day, slot: a.dataset.slot==='0' ? 0 : a.dataset.slot==='1' ? 1 : undefined}); break;
@@ -4022,6 +4327,8 @@ document.addEventListener('click', e=>{
     case 'cal-next': ui.calMonth = new Date(ui.calMonth.getFullYear(), ui.calMonth.getMonth()+1, 1); render(); break;
     case 'cal-sel': ui.calSel = a.dataset.d; { const d=parseYmd(ui.calSel); if(d.getMonth()!==ui.calMonth.getMonth()) ui.calMonth = new Date(d.getFullYear(), d.getMonth(), 1); } render(); break;
     case 'hist-filter': ui.histFilter = a.dataset.f; render(); break;
+    case 'hist-view': ui.histView = a.dataset.v; render(); $('#main').scrollTop = 0; break;
+    case 'site-open': openSiteSheet(a.dataset.s); break;
     
     
     
@@ -4147,6 +4454,8 @@ document.addEventListener('keydown', e=>{
   if(e.key==='Escape' && sheetOpen) closeSheet();
   // tappable rows act like buttons for keyboards and switch access
   if((e.key==='Enter' || e.key===' ') && e.target && e.target.matches && e.target.matches('.tap-row[role=button]')){ e.preventDefault(); e.target.click(); }
+  // body map sites are SVG groups (no .click() of their own)
+  if((e.key==='Enter' || e.key===' ') && e.target && e.target.matches && e.target.matches('.bm-site[data-action]')){ e.preventDefault(); e.target.dispatchEvent(new MouseEvent('click', {bubbles:true})); }
 });
 /* Rows built as <div class="tap-row" data-action> are announced and focusable as buttons. */
 /* Tablet mode helpers (only matter in two columns, see styles.css): a card with no card beside it takes the full
