@@ -10,9 +10,12 @@ Every version, newest first. Training, blood tests and health need a licence; ev
 - Live heart rate: setup help for Garmin's Broadcast Heart Rate
 - Health > Body has a Weight card with your trend, a chart, Log weight and a weigh-in history; your weigh-ins feed BMI, calories and the weekly report
 - Weight history from all your devices: your whole weight history in Health Connect (up to 10 years, from every app and scale, not just Health Connect's preferred one) shows on Health > Body, with 30 days / 90 days / 1 year / All ranges and where each reading came from; Setup warns if Health Connect's Access past data is off
+- Muscle map: sets per muscle over the last 7 days, 2 weeks or 30 days on a front and back figure, with anything you haven't trained (Training > Workout); change an exercise's muscles in Training > Setup > Exercises
 
 ### Both editions
 
+- Search: tap the magnifier at the top of any screen to find a feature, one of your compounds, an exercise or a blood test, and go straight to it
+- Dose log as a spreadsheet: export your doses as a CSV for Excel or Sheets, or import your history from another app or a spreadsheet (Setup > App settings > Backup, or History when it's empty)
 - Daily weigh-ins: enter your weight in the daily check-in (just the weight is fine), in kg, lb or stones and pounds (Setup > Check-in)
 - Anonymous usage count: once a day the app sends an anonymous count (version and how many days it was opened, no ID or data), so we know how many phones use it. See exactly what's sent, or turn it off, in Setup > App settings
 
