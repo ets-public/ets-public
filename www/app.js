@@ -77,7 +77,7 @@ const LAB_PRESETS = [
 const STORE_KEY = 'inj-data-v2';
 
 /* ================= State ================= */
-let db = { compounds:[], logs:[], labs:[], checkins:[], programmes:[], measures:[], health:{days:{}}, exercises:[], templates:[], workouts:[], activeWorkout:null, settings:{} };
+let db = { compounds:[], logs:[], labs:[], checkins:[], programmes:[], measures:[], weights:[], health:{days:{}}, exercises:[], templates:[], workouts:[], activeWorkout:null, settings:{} };
 const DEFAULT_SETTINGS = { reminders:false, morning:'08:00', night:'21:00', lowStockDoses:3, leadDays:14, currency:'$', autoBackup:true, lastBackupAt:null, lastBackupFile:null, lastBackupError:null, lockEnabled:false, lockAfter:0, privateNotifs:true, secureScreen:false, launcherShare:false, launcherNames:false };
 const ui = {
   tab:'today', mode:'inj', lastTab:{inj:'today', train:'workout', health:'hoverview'}, hMetric:null, hRange:30, histFilter:'all', calMonth:null, calSel:null, draft:null, tplEdit:null,
@@ -155,7 +155,7 @@ function drawText(volMl, c){
    markup into number fields, break ids, pollute prototypes or crash the app with nulls. */
 const NUM_KEYS = new Set(['strength','dosePerInj','dose','volumeMl','powderMg','waterMl','halfLife','every','sizeMl','remainingMl',
   'w','r','tr','reps','restSec','distanceM','elapsedSec','movingSec','elevGainM','avg','max','min','lowStockDoses','lockAfter','inc',
-  'durMin','heightCm','weightKg','bodyFat','price','leadDays','alertLow','alertHigh','everyWeeks','waist','chest','arm','thigh','hips','neck','calf','activity','hrMax','kcal','steps','lat','lon','alt','acc','dosesLeft','seg','pausedMs']);
+  'durMin','heightCm','weightKg','bodyFat','price','leadDays','alertLow','alertHigh','everyWeeks','waist','chest','arm','thigh','hips','neck','calf','kg','activity','hrMax','kcal','steps','lat','lon','alt','acc','dosesLeft','seg','pausedMs']);
 const ID_KEYS = new Set(['id','compoundId','exId','wid','templateId','chartCompound']);
 function cleanData(v, key, depth=0){
   if(depth > 14) return undefined;
@@ -200,6 +200,7 @@ function cleanCollections(d){
   d.checkins = normaliseCheckins(d.checkins);
   d.programmes = normaliseProgrammes(d.programmes);
   d.measures = normaliseMeasures(d.measures);
+  d.weights = normaliseWeights(d.weights);
   if(!isObj(d.settings)) d.settings = {};
   return d;
 }
@@ -224,8 +225,9 @@ async function rawSet(key, val){
 let saveTimer = null, modeSaveT = null, storageWarned = false;
 let _loadMap = null;    // day -> training load; cleared by save() and render()
 let _setsCache = null;   // training sets index; cleared by save(), rebuilt when the workout list changes
+let _hdCache = null;     // watch data with your own weigh-ins merged in; cleared by save()
 function save(){
-  _setsCache = null; _tlCache.clear(); _loadMap = null; _logIdx = null; _labTestsCache = null;
+  _setsCache = null; _hdCache = null; _tlCache.clear(); _loadMap = null; _logIdx = null; _labTestsCache = null;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(()=>{ rawSet(STORE_KEY, JSON.stringify(db)); scheduleReminders(); scheduleAutoBackup(); launcherPublish(); }, 120);
 }
@@ -277,6 +279,7 @@ async function load(){
   db.checkins = data.checkins || [];
   db.programmes = data.programmes || [];
   db.measures = data.measures || [];
+  db.weights = data.weights || [];
   db.health = data.health && typeof data.health.days==='object' ? data.health : {days:{}};
   db.exercises = Array.isArray(data.exercises) ? data.exercises : [];
   db.templates = Array.isArray(data.templates) ? data.templates : [];
@@ -1220,6 +1223,8 @@ function renderToday(){
   });
   
   html += checkinCardHtml();
+  html += usageCardHtml();
+  
   const withStatusAll = db.compounds.filter(inProtocol).map(c=>({c, st:statusFor(c)}));
   const supps = withStatusAll.filter(x=>isOral(x.c) && x.c.supplement && !x.st.finished);
   const withStatus = withStatusAll.filter(x=>!supps.includes(x));
@@ -1628,7 +1633,7 @@ function renderHistory(){
   </div>`;
   const list = db.logs.filter(l=> ui.histFilter==='all' || (ui.histFilter==='removed' ? !ids.has(l.compoundId) : l.compoundId===ui.histFilter))
     .slice().sort((a,b)=>+new Date(b.date) - +new Date(a.date));
-  if(!list.length) return html + `<div class="card"><div class="empty">Nothing logged yet.</div></div>` + reportBtnHtml();
+  if(!list.length) return html + `<div class="card"><div class="empty">Nothing logged yet.${ui.histFilter==='all' ? `<br><button class="btn btn-outline" data-action="dose-import" style="margin-top:12px">Switching from another app? Import a CSV</button>` : ''}</div></div>` + reportBtnHtml();
   const byId = {}; db.compounds.forEach(c=>{ byId[c.id] = c; });
   const limit = ui.ihLimit || 60;
   let lastDay = null, open = false;
@@ -1753,12 +1758,240 @@ function renderSetup(){
   html += `<div class="section-label">Check-in</div><div class="card">
     <div class="switch-row"><div><div class="list-title">Daily check-in</div><div class="list-sub">Rate energy, mood, libido and sleep, and note site reactions. Shown against your estimated levels and in the doctor report.</div></div>
       <label class="switch"><input type="checkbox" id="setCheckin" ${s.checkin!==false?'checked':''} aria-label="Daily check-in"><span></span></label></div>
+    <div class="field" style="margin:10px 0 0"><label for="setWUnit">Body weight in</label>
+      <select id="setWUnit">${[['kg','Kilograms (kg)'],['lb','Pounds (lb)'],['st','Stones and pounds (st lb)']].map(([v,l])=>`<option value="${v}" ${wUnit()===v?'selected':''}>${l}</option>`).join('')}</select></div>
   </div>`;
 
   html += `<p class="small muted" style="text-align:center; margin:18px 8px 4px">Planning tool only. Doses, draw volumes and level estimates come from what you enter. Check them against your prescription.</p>`;
   return html;
 }
 
+/* ================= Search =================
+   The magnifier in the top bar. Finds features by name and by the words people use for them ("scale" finds weigh-ins,
+   "E2" finds blood tests), plus your own compounds, exercises, templates and blood test markers, and takes you there:
+   it opens the right section and tab, then opens the sheet or scrolls to the setting and highlights it briefly.
+   Everything runs on the phone. Licence features are listed in every edition: without a licence they lead to the
+   page that explains them. Add an entry here with every new feature (a test opens each one).
+   go: m mode, tab, act an action to run (with data), sel/label the setting or section to highlight. p: needs a licence
+   (which promo page explains it). on: 'native' (Android app only), 'web' (iPhone web app only) or 'locked' (only
+   without a licence). info: a short answer shown instead of going anywhere. opt: the highlighted
+   part only shows with some data (check-ins, a profile, no workout running), so you may just land on the tab. */
+const SEARCH_FEATURES = [
+  // Protocol
+  {id:'today', t:'Today', w:'Protocol', k:'home due doses dashboard skip missed late overdue', go:{m:'inj', tab:'today'}},
+  {id:'log', t:'Log a dose', w:'Protocol › Today', k:'injection shot take record jab pin add dose', go:{m:'inj', tab:'today', act:'log'}},
+  {id:'levels', t:'Estimated levels chart', w:'Protocol › Today', k:'level blood concentration graph serum curve peak trough half life pharmacokinetics', go:{m:'inj', tab:'today', label:'Estimated levels'}},
+  {id:'feel', t:'How you’ve felt', w:'Protocol › Today', k:'mood energy libido sleep check in chart symptoms', opt:1, go:{m:'inj', tab:'today', label:'How you'}},
+  {id:'checkin', t:'Daily check-in', w:'Protocol › Today', k:'mood energy libido sleep rate feeling journal reaction site reaction', go:{m:'inj', tab:'today', act:'checkin-open'}},
+  {id:'calendar', t:'Calendar', w:'Protocol', k:'schedule month planned missed taken plan days', go:{m:'inj', tab:'calendar'}},
+  {id:'history', t:'Dose history', w:'Protocol › History', k:'log past injections entries list', go:{m:'inj', tab:'history'}},
+  {id:'sitemap', t:'Injection site map', w:'Protocol › History', k:'site rotation body map glute delt quad ventroglute where inject', go:{m:'inj', tab:'history', act:'hist-view', data:{v:'sites'}}},
+  {id:'report', t:'Doctor report (PDF)', w:'Protocol › History', k:'pdf share gp physician clinic print summary export report', go:{m:'inj', tab:'history', act:'report'}},
+  {id:'stock', t:'Stock', w:'Protocol', k:'inventory vials bottles supply reorder order run out left remaining', go:{m:'inj', tab:'stock'}},
+  {id:'stockadd', t:'Add stock', w:'Protocol › Stock', k:'new vial bottle bought order delivery inventory', go:{m:'inj', tab:'stock', act:'stock-new'}},
+  {id:'compounds', t:'Compounds in your protocol', w:'Protocol › Setup', k:'medication medicine drug schedule protocol regimen edit pause cycle stop end break taper delete remove dose change frequency eod twice weekly', go:{m:'inj', tab:'setup', label:'Compounds'}},
+  {id:'compoundadd', t:'Add a compound', w:'Protocol › Setup', k:'new medication medicine drug testosterone cypionate enanthate propionate undecanoate sustanon hcg gonadotropin anastrozole arimidex letrozole exemestane aromasin tamoxifen nolvadex clomiphene clomid enclomiphene cabergoline nandrolone deca npp trenbolone tren masteron drostanolone primobolan boldenone equipoise eq winstrol stanozolol anavar oxandrolone dianabol metandienone turinabol peptide bpc tb500 ipamorelin cjc tesamorelin hgh growth hormone somatropin igf semaglutide ozempic wegovy tirzepatide mounjaro retatrutide cagrilintide pt141 vitamin d fish oil oral tablet supplement schedule', go:{m:'inj', tab:'setup', act:'compound-add'}},
+  {id:'draw', t:'Syringe draw (mL and units)', w:'Protocol › Add or edit a compound', k:'syringe units ml volume draw how much insulin barrel concentration mg/ml calculator', go:{m:'inj', tab:'setup', label:'Compounds'}},
+  {id:'reconst', t:'Reconstitution (powder and water)', w:'Protocol › Add or edit a compound', k:'reconstitute bac water bacteriostatic powder peptide mix vial', go:{m:'inj', tab:'setup', act:'compound-add'}},
+  {id:'lowstock', t:'Low stock warning', w:'Protocol › Setup › Stock', k:'reorder warn running out delivery days currency', go:{m:'inj', tab:'setup', sel:'#setLow'}},
+  {id:'checkinset', t:'Check-in on or off', w:'Protocol › Setup', k:'daily check in turn off disable', go:{m:'inj', tab:'setup', sel:'#setCheckin'}},
+  {id:'wunit', t:'Weight units (kg, lb, st)', w:'Protocol › Setup', k:'kilograms pounds lbs lb stones stone st units imperial metric body weight', go:{m:'inj', tab:'setup', sel:'#setWUnit'}},
+  {id:'labs', t:'Blood tests', w:'Protocol › Labs', k:'labs bloodwork blood work results markers e2 estradiol oestradiol hematocrit haematocrit psa lipids cholesterol testosterone level shbg lh fsh prolactin', p:'labs', go:{m:'inj', tab:'labs'}},
+  {id:'labimport', t:'Import a lab PDF', w:'Protocol › Labs', k:'pdf report blood test upload scan results roidsafe', p:'labs', go:{m:'inj', tab:'labs', act:'lab-import'}},
+  {id:'labadd', t:'Add blood test results by hand', w:'Protocol › Labs', k:'enter manual results markers bloodwork', p:'labs', go:{m:'inj', tab:'labs', act:'lab-add'}},
+  {id:'labplan', t:'Blood test plan and reminders', w:'Protocol › Labs', k:'when next blood test schedule reminder bloodwork due', p:'labs', go:{m:'inj', tab:'labs', act:'lab-plan'}},
+  {id:'csvimport', t:'Import doses from a CSV', w:'Setup › App settings › Backup', k:'csv spreadsheet excel import other app switch transfer migrate my trt app regimen shotlee', go:{tab:'app', act:'dose-import'}},
+  {id:'csvexport', t:'Export doses as a CSV', w:'Setup › App settings › Backup', k:'csv spreadsheet excel export sheets download', go:{tab:'app', act:'dose-export'}},
+  // Training
+  {id:'workout', t:'Start a workout', w:'Training › Workout', k:'gym lift lifting session train exercise begin', p:'train', go:{m:'train', tab:'workout'}},
+  {id:'pastwk', t:'Log a past workout', w:'Training › History', k:'yesterday forgot add missed earlier session', p:'train', go:{m:'train', tab:'thistory', act:'wk-past'}},
+  {id:'cardio', t:'Run, walk, hike or treadmill', w:'Training › Workout', k:'cardio gps running jog walk hike treadmill route distance pace', p:'train', opt:1, go:{m:'train', tab:'workout', label:'Cardio'}},
+  {id:'thistory', t:'Training history', w:'Training › History', k:'past workouts sessions log runs', p:'train', go:{m:'train', tab:'thistory'}},
+  {id:'records', t:'Personal bests', w:'Training › Records', k:'pr pb records one rep max 1rm e1rm strongest best lift', p:'train', go:{m:'train', tab:'records'}},
+  {id:'templates', t:'Workout templates', w:'Training › Templates', k:'routine plan split program workout plan push pull legs', p:'train', go:{m:'train', tab:'templates'}},
+  {id:'tplnew', t:'New template', w:'Training › Templates', k:'create routine plan', p:'train', go:{m:'train', tab:'templates', act:'tpl-new'}},
+  {id:'programme', t:'Programmes and deload weeks', w:'Training › Workout', k:'program programme block periodisation deload weeks plan progression', p:'train', go:{m:'train', tab:'workout', act:'prog-new'}},
+  {id:'muscles', t:'Muscles worked (muscle map)', w:'Training › Workout', k:'muscle map body heatmap volume sets per week weekly undertrained balance chest back legs arms shoulders lagging', p:'train', opt:1, go:{m:'train', tab:'workout', label:'Muscles worked'}},
+  {id:'exmuscles', t:'Set an exercise\u2019s muscles', w:'Training › Setup › Exercises', k:'muscles worked exercise target primary secondary main helping', p:'train', go:{m:'train', tab:'setup', act:'tr-exlib'}},
+  {id:'rest', t:'Rest timer', w:'Training › Setup', k:'rest time between sets timer countdown seconds', p:'train', go:{m:'train', tab:'setup', act:'tr-defrest'}},
+  {id:'progression', t:'Weight jump for progression', w:'Training › Setup', k:'increment increase kg progressive overload suggestion', p:'train', go:{m:'train', tab:'setup', sel:'#setTrInc'}},
+  {id:'exlib', t:'Exercises', w:'Training › Setup', k:'exercise library list add custom movement', p:'train', go:{m:'train', tab:'setup', act:'tr-exlib'}},
+  {id:'strong', t:'Import from Strong', w:'Training › Setup', k:'strong app csv import workouts history transfer hevy', p:'train', go:{m:'train', tab:'setup', act:'tr-strong'}},
+  {id:'hrlive', t:'Live heart rate (Bluetooth)', w:'Health › Setup', k:'heart rate monitor chest strap polar bluetooth band hr zones live bpm', p:'health', on:'native', go:{m:'health', tab:'setup', label:'Live heart rate'}},
+  // Health
+  {id:'hoverview', t:'Health overview', w:'Health', k:'watch data readiness today recovery', p:'health', on:'native', go:{m:'health', tab:'hoverview'}},
+  {id:'readiness', t:'Readiness score', w:'Health › Overview', k:'recovery ready train today score hrv sleep', p:'health', on:'native', go:{m:'health', tab:'hoverview', act:'rd-open'}},
+  {id:'trends', t:'Watch data trends', w:'Health › Trends', k:'charts sleep resting heart rate hrv steps spo2 blood oxygen calories blood pressure', p:'health', on:'native', go:{m:'health', tab:'htrends'}},
+  {id:'weekly', t:'Weekly report', w:'Health › Weekly', k:'week summary adherence volume review', p:'health', go:{m:'health', tab:'hweek'}},
+  {id:'body', t:'Body profile', w:'Health › Body', k:'height age sex profile bmi body', p:'health', go:{m:'health', tab:'hbody'}},
+  {id:'weighin', t:'Weigh in', w:'Health › Body', k:'weight scale bodyweight weigh log kg lb', p:'health', go:{m:'health', tab:'hbody', act:'weight-log'}},
+  {id:'weighthist', t:'Weight history', w:'Health › Body', k:'weight trend chart bodyweight scale graph', p:'health', go:{m:'health', tab:'hbody', act:'weight-history'}},
+  {id:'measure', t:'Body measurements', w:'Health › Body', k:'waist chest arms tape measure circumference', p:'health', go:{m:'health', tab:'hbody', act:'meas-add'}},
+  {id:'photos', t:'Progress photos', w:'Health › Body', k:'photo picture compare before after physique', p:'health', go:{m:'health', tab:'hbody', label:'Progress photos'}},
+  {id:'macros', t:'Calories and macros', w:'Health › Body', k:'tdee calories macros protein carbs fat diet nutrition targets cut bulk maintenance', p:'health', opt:1, go:{m:'health', tab:'hbody', label:'Daily'}},
+  {id:'hrmax', t:'Heart-rate zones and max', w:'Health › Setup', k:'max heart rate zones hr max bpm', p:'health', on:'native', go:{m:'health', tab:'setup', sel:'#setHrMax'}},
+  {id:'hc', t:'Health Connect (watch data)', w:'Health › Setup', k:'garmin fitbit samsung watch wearable health connect sync permissions sleep steps import', p:'health', on:'native', go:{m:'health', tab:'setup', label:'Watch data'}},
+  // App settings
+  {id:'appset', t:'App settings', w:'Setup', k:'settings preferences options', go:{tab:'app'}},
+  {id:'fullapp', t:'What the full app adds', w:'Licence', k:'premium pro full buy price cost upgrade licence license unlock pay purchase key', on:'locked', go:{m:'train', tab:'tpromo'}},
+  {id:'dark', t:'Dark mode', w:'Follows your phone', k:'dark light mode theme night colours colors appearance', info:'ETS follows your phone\u2019s light or dark setting. Change it in your phone\u2019s display settings.'},
+  {id:'reminders', t:'Dose reminders', w:'Setup › App settings', k:'notifications notify alert alarm morning night remind', on:'native', go:{tab:'app', sel:'#setRem'}},
+  {id:'privnotif', t:'Private reminders', w:'Setup › App settings', k:'discreet hide compound names notifications privacy', go:{tab:'app', sel:'#setPrivNotif'}},
+  {id:'calrem', t:'Calendar reminders', w:'Setup › App settings', k:'ical calendar reminders iphone apple google calendar events', on:'web', go:{tab:'app', act:'cal-export'}},
+  {id:'cirem', t:'Check-in reminder', w:'Setup › App settings', k:'notification daily check in remind', on:'native', go:{tab:'app', sel:'#setCiRem'}},
+  {id:'weeklyrem', t:'Weekly report notification', w:'Setup › App settings', k:'notification sunday summary', on:'native', go:{tab:'app', sel:'#setWeekly'}},
+  {id:'lock', t:'App lock', w:'Setup › App settings › Privacy', k:'fingerprint face pin password biometric secure privacy lock', on:'native', go:{tab:'app', sel:'#setLock'}},
+  {id:'screens', t:'Block screenshots', w:'Setup › App settings › Privacy', k:'screenshot recent apps hide privacy secure', on:'native', go:{tab:'app', sel:'#setSecure'}},
+  {id:'backup', t:'Back up and restore', w:'Setup › App settings › Backup', k:'backup restore export save transfer new phone copy data', go:{tab:'app', label:'Backup'}},
+  {id:'autobackup', t:'Daily automatic backup', w:'Setup › App settings › Backup', k:'auto backup automatic daily documents', on:'native', go:{tab:'app', sel:'#setAutoBackup'}},
+  {id:'bkpass', t:'Backup password', w:'Setup › App settings › Backup', k:'encrypt encryption password protect backup', go:{tab:'app', act:'backup-pass'}},
+  {id:'restore', t:'Restore a backup', w:'Setup › App settings › Backup', k:'restore import backup new phone', go:{tab:'app', act:'import'}},
+  {id:'gdrive', t:'Google Drive backups', w:'Setup › App settings', k:'google drive cloud backup sign in account', on:'native', go:{tab:'app', label:'Google'}},
+  {id:'usage', t:'Anonymous usage count', w:'Setup › App settings', k:'usage statistics analytics privacy tracking turn off', go:{tab:'app', sel:'#setUsage'}},
+  {id:'licence', t:'Licence key', w:'Setup › App settings', k:'licence license key activate unlock full app buy premium devices', go:{tab:'app', label:'Licence'}},
+  {id:'updates', t:'App updates', w:'Setup › App settings', k:'update new version download upgrade changelog', on:'native', go:{tab:'app', label:'App updates'}},
+  {id:'launcher', t:'Home-screen launcher', w:'Setup › App settings', k:'launcher widget home screen summary', on:'native', go:{tab:'app', label:'Home-screen launcher'}},
+  {id:'about', t:'About and version', w:'Setup › App settings', k:'version about edition help support contact email feedback bug', go:{tab:'app', label:'About'}},
+];
+const SEARCH_SUGGEST = ['log', 'weighin', 'report', 'backup', 'labs', 'workout'];
+const srNorm = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9.%]+/g,' ').replace(/ae|oe/g,'e').trim();   // haematocrit = hematocrit, oestradiol = estradiol
+function srLev1(a, b){        // true when a and b are within one edit (a typo)
+  if(Math.abs(a.length - b.length) > 1) return false;
+  let i = 0, j = 0, d = 0;
+  while(i < a.length && j < b.length){
+    if(a[i]===b[j]){ i++; j++; continue; }
+    if(++d > 1) return false;
+    if(a.length > b.length) i++; else if(b.length > a.length) j++; else { i++; j++; }
+  }
+  return d + (a.length - i) + (b.length - j) <= 1;
+}
+function searchFeatureOn(f){
+  if(f.on==='native' && (!isNative || webApp())) return false;
+  if(f.on==='web' && !webApp()) return false;
+  if(f.on==='locked' && premiumOn()) return false;
+  if(f.id==='licence') return BUILD.edition==='premium' && !!Object.keys(BUILD.licenceKeys || {}).length;
+  return true;
+}
+/* every entry: features plus your own things, each {id, t, w, k, p?, go, kind} */
+function searchItems(){
+  const out = SEARCH_FEATURES.filter(searchFeatureOn).map(f=>Object.assign({kind:'Features'}, f));
+  db.compounds.forEach(c=>out.push({id:'c:'+c.id, kind:'Your compounds', t:c.name, w:inProtocol(c) ? 'In your protocol · edit' : 'In stock, not in use · edit', k:'compound '+(c.route||''), go:{m:'inj', tab:'setup', act:'compound-edit', data:{id:c.id}}}));
+  if(premiumOn()){
+    (db.exercises||[]).forEach(e=>out.push({id:'e:'+e.id, kind:'Exercises', t:e.name, w:'Exercise · records and history', k:'exercise', go:{m:'train', tab:'records', act:'rec-open', data:{id:e.id}}}));
+    (db.templates||[]).forEach(t=>out.push({id:'t:'+t.id, kind:'Templates', t:t.name, w:'Workout template', k:'template routine', go:{m:'train', tab:'templates', act:'tpl-edit', data:{id:t.id}}}));
+    [...new Set((db.labs||[]).map(r=>r.marker).filter(Boolean))].forEach(m=>out.push({id:'l:'+m, kind:'Blood tests', t:m, w:'Blood test marker', k:'lab marker result', go:{m:'inj', tab:'labs', act:'lab-open', data:{m}}}));
+  }
+  return out;
+}
+function srPrep(it){
+  if(!it._t){ it._t = srNorm(it.t); it._tw = it._t.split(' '); it._kw = srNorm(it.k).split(' '); it._ww = srNorm(it.w).split(' '); }
+  return it;
+}
+/* strict: words starting with what you typed. loose (only when strict finds nothing): inside words, and one-letter typos */
+function searchScore(it, toks, loose){
+  srPrep(it);
+  let score = 0;
+  for(const q of toks){
+    let s = 0;
+    if(it._tw.some(w=>w.startsWith(q))) s = 10;
+    else if(it._kw.some(w=>w.startsWith(q))) s = 5;
+    else if(it._ww.some(w=>w.startsWith(q))) s = 2;
+    else if(loose && q.length >= 3 && it._t.includes(q)) s = 4;
+    else if(loose && q.length >= 4 && it._tw.concat(it._kw).some(w=>w.length >= 4 && w[0]===q[0] && (srLev1(q, w) || srLev1(q, w.slice(0, q.length))))) s = 2;
+    if(!s) return 0;
+    score += s;
+  }
+  const qq = toks.join(' ');
+  if(it._t === qq) score += 20; else if(it._t.startsWith(qq)) score += 8;
+  return score + Math.min((db.settings.searchUse || {})[it.id] || 0, 5);
+}
+function searchRun(q, items){
+  const toks = srNorm(q).split(' ').filter(Boolean);
+  if(!toks.length) return [];
+  items = items || searchItems();
+  const run = loose => items.map(it=>({it, s:searchScore(it, toks, loose)})).filter(x=>x.s > 0);
+  let hits = run(false); if(!hits.length) hits = run(true);
+  return hits.sort((a,b)=>b.s - a.s || a.it.t.localeCompare(b.it.t)).slice(0, 30).map(x=>x.it);
+}
+function searchRowHtml(it, i){
+  const locked = it.p && !premiumOn();
+  if(it.info) return `<button type="button" class="list-item sr-row" data-sr="${i}"><span class="list-main"><span class="list-title">${esc(it.t)}</span><span class="list-sub">${esc(it.w)}</span></span></button>`;
+  return `<button type="button" class="list-item sr-row" data-sr="${i}">
+    <span class="list-main"><span class="list-title">${esc(it.t)}</span><span class="list-sub">${esc(it.w)}</span></span>
+    ${locked ? '<span class="tag tag-muted">Full app</span>' : '<svg class="chev" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>'}</button>`;
+}
+function openSearch(){
+  openSheet(`<h2 style="margin-bottom:10px">Search</h2>
+    <div class="field" style="margin:0 0 6px"><input type="search" id="srQ" placeholder="Features, compounds, exercises…" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go" aria-label="Search the app"></div>
+    <div id="srOut" class="sr-out" aria-live="polite"></div>`);
+  const sh = $('#sheetRoot .sheet'); if(sh) sh.classList.add('sheet-search');
+  let shown = [];
+  const items = searchItems();
+  const draw = () => {
+    const q = $('#srQ').value;
+    if(!q.trim()){
+      const by = id => items.find(x=>x.id===id);
+      const recent = (db.settings.searchRecent || []).map(by).filter(Boolean).slice(0, 5);
+      const sug = SEARCH_SUGGEST.map(by).filter(x=>x && !recent.includes(x));
+      shown = recent.concat(sug);
+      $('#srOut').innerHTML = (recent.length ? `<div class="section-label">Recent</div><div class="card sr-card">${recent.map((it,i)=>searchRowHtml(it, i)).join('')}</div>` : '')
+        + `<div class="section-label">Try</div><div class="card sr-card">${sug.map((it,i)=>searchRowHtml(it, recent.length + i)).join('')}</div>`;
+      return;
+    }
+    shown = searchRun(q, items);
+    if(!shown.length){ $('#srOut').innerHTML = `<div class="card"><div class="empty small">Nothing found for “${esc(q.trim())}”. Try another word, like “weight”, “backup” or a compound’s name.</div></div>`; return; }
+    let html = '', kind = null, i = 0;
+    for(const it of shown){
+      if(it.kind !== kind){ if(kind) html += '</div>'; html += `<div class="section-label">${esc(it.kind)}</div><div class="card sr-card">`; kind = it.kind; }
+      html += searchRowHtml(it, i++);
+    }
+    $('#srOut').innerHTML = html + '</div>';
+  };
+  $('#srQ').addEventListener('input', draw);
+  $('#srQ').addEventListener('keydown', e=>{ if(e.key==='Enter' && shown[0]){ e.preventDefault(); searchGo(shown[0]); } });
+  $('#srOut').addEventListener('click', e=>{ const b = e.target.closest('[data-sr]'); if(b && shown[+b.dataset.sr]) searchGo(shown[+b.dataset.sr]); });
+  draw();
+  setTimeout(()=>{ const q = $('#srQ'); if(q) q.focus(); }, 60);
+}
+function searchGo(it){
+  const s = db.settings;
+  s.searchUse = s.searchUse || {}; s.searchUse[it.id] = (s.searchUse[it.id] || 0) + 1;
+  s.searchRecent = [it.id].concat((s.searchRecent || []).filter(x=>x!==it.id)).slice(0, 8);
+  persistQuiet();
+  closeSheet();
+  if(it.info){ toast(it.info); return; }
+  let g = it.go || {};
+  // a template being edited isn't swapped for another one (its changes would be lost)
+  if(ui.tplEdit && (g.act==='tpl-new' || (g.act==='tpl-edit' && g.data && g.data.id!==ui.tplEdit.id))){
+    g = {m:'train', tab:'templates'}; setTimeout(()=>toast('Save or cancel the template you\u2019re editing first.'), 300);
+  }
+  if(it.p && !premiumOn()) g = it.p==='labs' ? {m:'inj', tab:'labs'} : {m:it.p, tab:it.p==='train' ? 'tpromo' : 'hpromo'};
+  if(g.m && g.m !== ui.mode) setMode(g.m);
+  if(g.tab){ ui.tab = g.tab; render(); }
+  $('#main').scrollTop = 0;
+  if(g.act) setTimeout(()=>searchAct(g.act, g.data), 40);
+  if(g.sel || g.label) setTimeout(()=>searchFlash(g), 60);
+}
+function searchAct(action, data){
+  const b = document.createElement('button'); b.type = 'button'; b.hidden = true; b.dataset.action = action;
+  Object.entries(data || {}).forEach(([k,v])=>{ b.dataset[k] = v; });
+  $('#main').appendChild(b); b.click(); b.remove();
+}
+/* scroll to a setting (a CSS selector) or a section (its heading's first words), and highlight it for a moment */
+function searchFlash(g){
+  let el = null;
+  if(g.sel){ const x = document.querySelector('#main ' + g.sel); el = x && (x.closest('.switch-row, .field, .list-item') || x); }
+  if(!el && g.label){
+    const want = g.label.toLowerCase();
+    const h = [...document.querySelectorAll('#main .section-label')].find(x=>x.textContent.trim().toLowerCase().startsWith(want));
+    el = h && (h.nextElementSibling || h);
+  }
+  if(!el) return false;
+  el.scrollIntoView({block:'center', behavior:'smooth'});
+  el.classList.remove('sr-flash'); void el.offsetWidth; el.classList.add('sr-flash');
+  setTimeout(()=>el.classList.remove('sr-flash'), 2200);
+  return true;
+}
 function appSettingsLink(){
   return `<div class="section-label">App</div><div class="card" style="padding:0 14px">${notifLinkHtml()}<div class="list-item tap-row" data-action="app-settings">
     <div class="list-main"><div class="list-title">App settings</div><div class="list-sub">Google · app lock · backups</div></div>
@@ -1774,7 +2007,7 @@ const BUILD = Object.assign({ version: 'dev', edition: 'premium', siteUrl: '' },
 const DEMO = (()=>{ try{ return (BUILD.platform === 'web' || BUILD.version === 'dev') && /[?&]demo(=[^&]*)?(&|$)/.test(location.search); }catch(e){ return false; } })();
 const demoMem = new Map();
 const DEMO_BLOCK = {
-  'export':'backups', 'import':'restoring a backup', 'backup-now':'backups', 'backup-pass':'backups', 'cal-export':'Calendar reminders',
+  'export':'backups', 'import':'restoring a backup', 'dose-export':'exports', 'dose-import':'imports', 'backup-now':'backups', 'backup-pass':'backups', 'cal-export':'Calendar reminders',
   'gd-signin':'Google Drive', 'gd-backup':'Google Drive', 'gd-restore':'Google Drive', 'photo-add':'progress photos',
   'lic-enter':'licence keys', 'lic-recheck':'licence keys', 'lic-remove':'licence keys',
 };
@@ -1847,6 +2080,9 @@ function demoData(){
   }
   const health = {days:{}};
   for(let i = 60; i >= 1; i--) health.days[ymd(addDays(today, -i))] = {restingHeartRate:pick(57,63), hrv:pick(44,60), sleepMin:pick(395,480), steps:pick(6500,12500)};
+  // morning weigh-ins on most days, drifting down slowly
+  const weights = [];
+  for(let i = 60; i >= 0; i--){ if(i && rnd() < 0.2) continue; weights.push({date:ymd(addDays(today, -i)), kg:round(88.9 - (60-i)*0.012 + (rnd()-0.5)*0.9, 1)}); }
   const exp = ymd(addDays(today, 420));
   const out = {
     compounds:[
@@ -1857,9 +2093,9 @@ function demoData(){
         vial:{sizeMl:30, remainingMl:30 - aiSinceOpen*0.5, openedAt:opened.toISOString(), price:24}},
       {id:'demoD3', name:'Vitamin D3', form:'oral', piece:'softgel', supplement:true, strength:5000, unit:'iu', route:'Oral', schedule:{type:'interval', every:1, start:ymd(start)}, time:'morning', dosePerInj:5000, hlChecked:true},
     ],
-    logs, labs, checkins, health, exercises:ex, templates, workouts, activities,
+    logs, labs, checkins, weights, health, exercises:ex, templates, workouts, activities,
     measures:[{id:'dm1', date:ymd(addDays(today,-56)), waist:88, chest:106, arm:38.5}, {id:'dm2', date:ymd(addDays(today,-28)), waist:87, chest:107, arm:39}, {id:'dm3', date:ymd(addDays(today,-3)), waist:86, chest:108, arm:39.5}],
-    settings:{mode:'inj', checkin:true, currency:'$', lastBackupAt:new Date().toISOString(), installHintOff:true, calNudgeOff:true, trSeeded:true, tplSeeded:true},
+    settings:{mode:'inj', checkin:true, currency:'$', wUnit:'kg', lastBackupAt:new Date().toISOString(), installHintOff:true, calNudgeOff:true, trSeeded:true, tplSeeded:true},
   };
   
   return out;
@@ -1870,6 +2106,65 @@ function siteLink(path){ const u = String(BUILD.siteUrl||''); return /^https:\/\
    app lock, Google Drive, notifications, the APK updater) are hidden. Reminders go into the phone's Calendar
    instead, and a service worker keeps the app working offline and updates it. */
 function webApp(){ return BUILD.platform === 'web'; }
+
+/* ================= Anonymous usage counts =================
+   So we know how many phones use the app and how often. At most once a day, while allowed (Setup > App settings),
+   the app tells the server it was opened. There's no identifier of any kind: just the edition, the version, whether
+   this is the phone's first count / first this week / first this month, how many of the last 7 and 28 days the app
+   was opened, and roughly how long ago it was installed. The list of days stays on this phone. Nothing you've logged
+   is ever sent. Counting starts once the notice has been seen (OK tapped, or 3 days after it first showed). */
+const USAGE_AGE = d => d < 1 ? '0' : d < 7 ? '1-6' : d < 30 ? '7-29' : d < 90 ? '30-89' : '90+';
+function usageState(){ return db.settings.usage || (db.settings.usage = {first: ymd(new Date()), days: []}); }
+function usageOn(){ return db.settings.usageStats !== false; }
+function usageEdition(){
+  if(webApp()) return 'web';
+  if(BUILD.edition === 'free') return 'free';
+  
+  return 'full';                                     // the full app (e.g. from F-Droid) without a licence
+}
+const mondayKey = d => { const x = dayStart(d); x.setDate(x.getDate() - (x.getDay() + 6) % 7); return ymd(x); };
+function usageBody(){
+  const u = usageState(), now = new Date(), today = ymd(now), k7 = ymd(addDays(now, -6));
+  return {v:1, ed:usageEdition(), ver:BUILD.version, d7: Math.max(1, u.days.filter(k=>k >= k7).length), d28: Math.max(1, u.days.length),
+    age: USAGE_AGE(diffDays(parseYmd(today), parseYmd(u.first))), first: !u.pinged, wk: u.wk !== mondayKey(now), mo: u.mo !== today.slice(0, 7)};
+}
+function usageNoticeDue(){ return !DEMO && usageOn() && !db.settings.usageNoticeDone; }
+let usageBusy = false;
+async function usageTick(){
+  if(DEMO || !/^\d+\.\d+\.\d+$/.test(String(BUILD.version))) return;          // never from the demo or dev builds
+  const u = usageState(), now = new Date(), today = ymd(now);
+  if(!u.days.includes(today)){ const from = ymd(addDays(now, -27)); u.days = u.days.filter(k=>k >= from).concat(today).slice(-28); save(); }
+  if(!usageOn() || usageBusy || u.ping === today) return;
+  const seen = db.settings.usageNoticeDone || (db.settings.usageNoticeAt && Date.now() - Date.parse(db.settings.usageNoticeAt) > 3*DAY);
+  const base = siteLink(''); if(!seen || !base) return;
+  const body = usageBody(); usageBusy = true;
+  try{
+    const r = await fetch(base + '/api/ping', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body), cache:'no-store'});
+    if(r.ok || r.status === 400){ u.ping = today; u.pinged = true; u.wk = mondayKey(now); u.mo = today.slice(0, 7); save(); }
+  }catch(e){}                                                          // offline: try again next time the app opens
+  finally{ usageBusy = false; }
+}
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) setTimeout(usageTick, 1500); });
+function usageCardHtml(){
+  if(!usageNoticeDue()) return '';
+  if(!db.settings.usageNoticeAt){ db.settings.usageNoticeAt = new Date().toISOString(); setTimeout(save, 0); }
+  return `<div class="card usage-card"><div class="list-title">Anonymous usage count</div>
+    <p class="small" style="margin:6px 0 10px">To see how many phones use ETS and how often, the app sends one anonymous count a day: the version, and how many days this week it was opened. No ID, nothing you've logged, nothing that identifies you or this phone.</p>
+    <div class="foot-btns"><button class="btn btn-outline" data-action="usage-show">What's sent</button><button class="btn btn-outline" data-action="usage-off">Turn off</button><button class="btn" data-action="usage-ok">OK</button></div></div>`;
+}
+function openUsageSheet(){
+  openSheet(`<h2>Anonymous usage count</h2>
+    <p class="muted" style="margin-top:-6px">At most once a day, when the app is opened and online, it sends exactly this:</p>
+    <pre class="mono small usage-json">${esc(JSON.stringify(usageBody(), null, 1))}</pre>
+    <ul class="small" style="padding-left:18px">
+      <li><b>ed</b>: which app (free edition, full app, licensed or web app). <b>ver</b>: its version.</li>
+      <li><b>d7</b>, <b>d28</b>: how many of the last 7 and 28 days it was opened. <b>age</b>: roughly how long ago it was installed.</li>
+      <li><b>first</b>, <b>wk</b>, <b>mo</b>: whether this is the first count from this phone, this week and this month, so phones can be counted without an ID.</li>
+    </ul>
+    <p class="small">There's no device ID, licence key, account or anything you've logged, and the server doesn't keep your IP address. It only adds to daily totals. Turn it off any time in Setup > App settings.</p>
+    <button class="btn btn-block" id="usageClose">Close</button>`);
+  $('#usageClose').addEventListener('click', closeSheet);
+}
 const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => { try{ return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; }catch(e){ return false; } };
 const web = { swWaiting:null, reloading:false };
@@ -2042,6 +2337,11 @@ function renderAppSettings(){
   </div>`;
 
   const lb = s.lastBackupAt ? `${fmtDate(s.lastBackupAt)} ${fmtTime(s.lastBackupAt)}` : 'Never';
+  html += `<div class="section-label">Usage count</div><div class="card">
+    <div class="switch-row"><div><div class="list-title">Send an anonymous usage count</div><div class="list-sub">Once a day: the app version and how many days this week it was opened. No ID and nothing you've logged.</div></div>
+      <label class="switch"><input type="checkbox" id="setUsage" ${usageOn()?'checked':''} aria-label="Send an anonymous usage count"><span></span></label></div>
+    <button class="btn btn-outline" data-action="usage-show" style="margin-top:8px">See exactly what's sent</button>
+  </div>`;
   html += `<div class="section-label">Backup</div><div class="card">
     ${isNative ? `<div class="switch-row"><div><div class="list-title">Daily automatic backup</div><div class="list-sub">Saved to Documents/ETS on this phone. The last 14 days are kept.</div></div>
       <label class="switch"><input type="checkbox" id="setAutoBackup" ${s.autoBackup?'checked':''} aria-label="Daily automatic backup"><span></span></label></div>` :
@@ -2051,10 +2351,12 @@ function renderAppSettings(){
     ${isNative && s.lastBackupError ? `<div class="form-err" style="margin:6px 0 0">Backup failed: ${esc(s.lastBackupError)}</div>` : ''}
     ${!s.backupCrypto ? `<p class="small" style="margin:8px 0 0"><b>Tip:</b> set a backup password below. Without one, anyone who finds a backup file${isNative ? ' in the phone\u2019s Documents folder or your Google Drive' : ''} can read it.</p>` : ''}
     <div class="btn-row" style="margin-top:12px">${isNative?`<button class="btn" data-action="backup-now">Back up now</button>`:''}<button class="btn ${isNative?'btn-outline':''}" data-action="export">${isNative?'Share backup':'Export backup'}</button><button class="btn btn-outline" data-action="import">Restore</button></div>
+    <div class="switch-row" style="border-top:1px solid var(--hair); margin-top:12px"><div><div class="list-title">Dose log as a spreadsheet</div><div class="list-sub">Export your doses as a CSV for Excel or Sheets, or import them from another app.</div></div></div>
+    <div class="btn-row" style="margin-top:4px"><button class="btn btn-outline" data-action="dose-export">Export CSV</button><button class="btn btn-outline" data-action="dose-import">Import CSV</button></div>
     <div class="switch-row" style="border-top:1px solid var(--hair); margin-top:12px"><div><div class="list-title">Backup password</div><div class="list-sub">${s.backupCrypto ? 'On. Backups are encrypted and need the password to restore.' : 'Off. Anyone who gets a backup file can read it.'}</div></div>
       <button class="btn btn-outline" data-action="backup-pass" style="flex:none">${s.backupCrypto ? 'Change' : 'Set up'}</button></div>
     ${webApp() ? `<p class="small muted" style="margin:10px 0 0">Export saves a file: choose <b>Save to Files</b> (iCloud Drive) or email it to yourself. Restore it on any phone, including the Android app.</p>` : gdCfg().email ? '' : `<p class="small muted" style="margin:10px 0 0">For a copy off the phone, sign in with Google above, or use Share backup.</p>`}
-    <p class="small muted" style="margin:12px 0 0">Stored: ${[[db.compounds.length,'compound'],[db.logs.length,'dose'],[db.labs.length,'lab result'],[(db.workouts||[]).length,'workout'],[(db.activities||[]).length,'run/walk/hike','runs/walks/hikes'],[Object.keys((db.health&&db.health.days)||{}).length,'day of watch data','days of watch data']].filter(([n],i)=>i<2 || n).map(([n,a,b])=>`${n} ${n===1?a:(b||a+'s')}`).join(' \u00b7 ')}</p>
+    <p class="small muted" style="margin:12px 0 0">Stored: ${[[db.compounds.length,'compound'],[db.logs.length,'dose'],[db.labs.length,'lab result'],[(db.workouts||[]).length,'workout'],[(db.activities||[]).length,'run/walk/hike','runs/walks/hikes'],[(db.weights||[]).length,'weigh-in'],[Object.keys((db.health&&db.health.days)||{}).length,'day of watch data','days of watch data']].filter(([n],i)=>i<2 || n).map(([n,a,b])=>`${n} ${n===1?a:(b||a+'s')}`).join(' \u00b7 ')}</p>
   </div>
 `;
   
@@ -2764,8 +3066,59 @@ function normaliseCheckins(list){
   return [...byDay.values()].sort((a,b)=>a.date<b.date?-1:1).slice(-5000);
 }
 const checkinOn = k => (db.checkins||[]).find(x=>x.date===k) || null;
+/* ================= Body weight =================
+   db.weights = [{date:'YYYY-MM-DD', kg}], one per day, logged in the check-in or on Health > Body.
+   Always stored in kg; shown in kg, lb or stones and pounds (Setup > Check-in > Body weight in). */
+function normaliseWeights(list){
+  const byDay = new Map();
+  (Array.isArray(list) ? list : []).filter(isObj).forEach(x=>{ const kg = +x.kg; if(okYmd(x.date) && kg>=20 && kg<=400) byDay.set(x.date, {date:x.date, kg:round(kg, 2)}); });
+  return [...byDay.values()].sort((a,b)=>a.date<b.date?-1:1).slice(-20000);
+}
+const weightOn = k => (db.weights||[]).find(x=>x.date===k) || null;
+function setWeight(k, kg){ db.weights = normaliseWeights((db.weights||[]).filter(x=>x.date!==k).concat(kg!=null ? [{date:k, kg}] : [])); }
+const KG_LB = 2.20462262;
+function wUnit(){ const u = db.settings.wUnit; return u==='lb' || u==='st' ? u : 'kg'; }
+function stLb(kg){ let st = Math.floor(kg*KG_LB/14), lb = round(kg*KG_LB - st*14, 1); if(lb >= 14){ st++; lb = round(lb-14, 1); } return [st, lb]; }
+/* a body weight, e.g. "88.2 kg", "194.5 lb", "13 st 12.5 lb" */
+function fmtW(kg){
+  if(kg==null || !isFinite(kg)) return '—';
+  const u = wUnit();
+  if(u==='lb') return `${round(kg*KG_LB, 1)} lb`;
+  if(u==='st'){ const [st, lb] = stLb(kg); return `${st} st ${lb} lb`; }
+  return `${round(kg, 1)} kg`;
+}
+/* a change in weight (no sign), in kg or lb */
+function fmtWd(kg){ return wUnit()==='kg' ? `${round(Math.abs(kg), 1)} kg` : `${round(Math.abs(kg)*KG_LB, 1)} lb`; }
+/* weight input in the chosen unit (stones get two boxes) */
+function wFieldHtml(id, label, kg){
+  const u = wUnit(), v = kg>0 ? kg : null;
+  if(u==='st'){ const [st, lb] = v ? stLb(v) : ['', ''];
+    return `<div class="field"><span class="field-label" id="${id}L">${esc(label)}</span><div class="row2" role="group" aria-labelledby="${id}L" style="gap:8px">
+      <div class="w-unit"><input id="${id}St" type="number" inputmode="numeric" min="3" max="63" step="1" value="${esc(st)}" aria-label="Stones"><span>st</span></div>
+      <div class="w-unit"><input id="${id}Lb" type="number" inputmode="decimal" min="0" max="13.9" step="0.1" value="${esc(lb)}" aria-label="Pounds"><span>lb</span></div></div></div>`; }
+  return `<div class="field"><label for="${id}">${esc(label)}</label><div class="w-unit"><input id="${id}" type="number" inputmode="decimal" min="${u==='lb'?44:20}" max="${u==='lb'?880:400}" step="0.1" value="${v ? esc(u==='lb' ? round(v*KG_LB, 1) : round(v, 1)) : ''}"><span>${u}</span></div></div>`;
+}
+/* reads it back: kg, null when empty, NaN when not a sensible weight */
+function readW(id){
+  if(wUnit()==='st'){
+    const a = $('#'+id+'St'), b = $('#'+id+'Lb'); if(!a) return null;
+    if(!a.value.trim() && !b.value.trim()) return null;
+    const st = num(a.value || '0'), lb = num(b.value || '0');
+    const kg = (st*14 + lb)/KG_LB;
+    return st>=0 && lb>=0 && lb<14 && kg>=20 && kg<=400 ? kg : NaN;
+  }
+  const el = $('#'+id); if(!el || !el.value.trim()) return null;
+  const v = num(el.value), kg = wUnit()==='lb' ? v/KG_LB : v;
+  return kg>=20 && kg<=400 ? kg : NaN;
+}
+function wFieldDisable(id, off){ document.querySelectorAll(`#${id}, #${id}St, #${id}Lb`).forEach(el=>{ el.disabled = off; }); }
+function wFieldSet(id, kg){
+  if(wUnit()==='st'){ const [st, lb] = stLb(kg); if($('#'+id+'St')){ $('#'+id+'St').value = st; $('#'+id+'Lb').value = lb; } }
+  else if($('#'+id)) $('#'+id).value = wUnit()==='lb' ? round(kg*KG_LB, 1) : round(kg, 1);
+}
 function checkinAvg(x){ const v = CHECK_FIELDS.map(([k])=>x[k]).filter(n=>n!=null); return v.length ? v.reduce((a,b)=>a+b,0)/v.length : null; }
 function checkinText(x){
+  if(!x) return '';
   const parts = CHECK_FIELDS.filter(([k])=>x[k]!=null).map(([k,l])=>`${k==='sleepQ'?'Sleep':l} ${x[k]}`);
   if(x.site && x.site.issues.length) parts.push(`site: ${x.site.issues.map(siteIssueLabel).join(', ').toLowerCase()}`);
   return parts.join(' · ') || 'No scores';
@@ -2779,10 +3132,11 @@ function recentSiteLog(dayK){
 function checkinCardHtml(){
   if(db.settings.checkin === false || !db.compounds.some(inProtocol)) return '';
   const k = ymd(new Date()), x = checkinOn(k);
+  const wt = weightOn(k);
   if(x) return `<div class="card checkin-done tap-row" data-action="checkin-open" data-day="${esc(k)}" aria-label="Edit today's check-in">
-      <span class="alert-code" style="color:var(--muted)">CHECKED IN</span><span class="small">${esc(checkinText(x))}</span></div>`;
+      <span class="alert-code" style="color:var(--muted)">CHECKED IN</span><span class="small">${esc([wt ? fmtW(wt.kg) : '', checkinText(x)].filter(Boolean).join(' · '))}</span></div>`;
   if(db.settings.checkinSkip === k) return '';
-  return `<div class="card checkin-card"><div><div class="list-title">How are you today?</div><div class="list-sub">Energy, mood, libido, sleep and any site reaction. About 10 seconds.</div></div>
+  return `<div class="card checkin-card"><div><div class="list-title">How are you today?</div><div class="list-sub">${wt ? `Weight ${esc(fmtW(wt.kg))} logged. Add energy, mood, libido, sleep and any site reaction.` : 'Weight, energy, mood, libido, sleep and any site reaction. About 10 seconds.'}</div></div>
     <div class="foot-btns"><button class="btn btn-outline" data-action="checkin-skip">Not today</button><button class="btn" data-action="checkin-open" data-day="${esc(k)}">Check in</button></div></div>`;
 }
 function openCheckinSheet(dayK){
@@ -2793,6 +3147,7 @@ function openCheckinSheet(dayK){
   const scale = [1,2,3,4,5].map(n=>[String(n), String(n)]);
   openSheet(`<h2>Check-in</h2>
     <p class="muted" style="margin-top:-6px">${esc(fmtDate(parseYmd(k)))}</p>
+    ${wFieldHtml('ciW', 'Weight (optional)', (weightOn(k)||{}).kg)}
     ${CHECK_FIELDS.map(([f,l])=>`<div class="field ci-field"><span class="field-label" id="cil_${f}">${esc(l)}</span>${segHtml('ci_'+f, scale, ex && ex[f]!=null ? String(ex[f]) : null).replace('role="group"', `role="group" aria-labelledby="cil_${f}"`)}<div class="ci-ends" aria-hidden="true"><span>Low</span><span>High</span></div></div>`).join('')}
     ${sl ? `<div class="field"><span class="field-label">Injection site · ${esc(sl.site)}, ${esc(fmtShort(sl.date))}</span>
       <div class="opt-grid" id="ciSite" role="group">${SITE_ISSUES.map(([v,l])=>`<button type="button" class="opt ${siteIssues.has(v)?'active':''}" aria-pressed="${siteIssues.has(v)}" data-v="${esc(v)}">${esc(l)}</button>`).join('')}</div>
@@ -2817,11 +3172,17 @@ function openCheckinSheet(dayK){
     b.classList.toggle('active', on); b.setAttribute('aria-pressed', String(on));
   });
   $('#ciSave').addEventListener('click', ()=>{
-    const note = $('#ciNote').value.trim().slice(0, 500);
-    if(CHECK_FIELDS.every(([f])=>vals[f]==null) && !siteIssues.size && !note) return $('#ciErr').textContent = 'Pick at least one score, or close this.';
-    const o = {date:k, ...vals, site: sl && siteIssues.size ? {logId: sl.id, issues:[...siteIssues]} : null, note};
-    db.checkins = normaliseCheckins((db.checkins||[]).filter(x=>x.date!==k).concat([o]));
-    save(); closeSheet(); render(); haptic('success'); toast('Check-in saved');
+    const note = $('#ciNote').value.trim().slice(0, 500), kg = readW('ciW'), hadW = !!weightOn(k);
+    if(Number.isNaN(kg)) return $('#ciErr').textContent = 'That weight doesn\u2019t look right. Check the number and unit.';
+    const scores = !(CHECK_FIELDS.every(([f])=>vals[f]==null) && !siteIssues.size && !note);
+    if(!scores && kg==null && !hadW && !ex) return $('#ciErr').textContent = 'Enter your weight or pick at least one score, or close this.';
+    setWeight(k, kg);
+    if(scores){
+      const o = {date:k, ...vals, site: sl && siteIssues.size ? {logId: sl.id, issues:[...siteIssues]} : null, note};
+      db.checkins = normaliseCheckins((db.checkins||[]).filter(x=>x.date!==k).concat([o]));
+    } else db.checkins = (db.checkins||[]).filter(x=>x.date!==k);
+    save(); closeSheet(); render(); haptic('success');
+    toast(scores ? 'Check-in saved' : kg!=null ? `Weight saved: ${fmtW(kg)}` : 'Weight removed');
   });
   if(ex) $('#ciDel').addEventListener('click', e=>armButton(e.currentTarget, 'Tap again to delete', ()=>{
     db.checkins = (db.checkins||[]).filter(x=>x.date!==k); save(); closeSheet(); render(); toast('Check-in deleted');
@@ -2970,7 +3331,7 @@ function stockCard(c){
   h += `<div class="kv"><span>Open ${contW(c)}</span><span>${st ? `${round(st.rem,2)} / ${round(c.vial.sizeMl,2)} ${esc(volUnit(c,2))} · ${fmtStock(oh.openMg, c.unit)}${expBit(c.vial.expiry)}` : 'None'}</span></div>`;
   lines.forEach(x=>{
     const extra = `${x.price>0 ? ` · ${fmtMoney(x.price)}` : ''}${expBit(x.expiry)}${x.batch ? ` · batch ${esc(x.batch)}` : ''}`;
-    h += `<div class="kv kv-wrap"><span>Sealed · ${esc(lineLabel(c, x))}${x.tested ? ' <span class="lab-tag">lab-tested</span>' : ''}<br><span class="small muted">${fmtStock(sealedMg(c, x), c.unit)} each${extra}</span></span><span>× ${x.count}</span></div>`;
+    h += `<div class="kv kv-wrap"><span>Sealed · ${esc(lineLabel(c, x))}${x.tested ? ' <span class="lab-tag">lab-tested</span>' : ''}<br><span class="small muted">${fmtStock(sealedMg(c, x), c.unit)} each${extra}</span></span><span style="white-space:nowrap">× ${x.count}</span></div>`;
   });
   h += `<div class="kv"><span>On hand</span><span>${fmtStock(oh.totalMg, c.unit)}${oh.sealed ? ` · ${oh.sealed} sealed` : ''}${oh.expired ? ` · <span class="exp-warn">${oh.expired} expired not counted</span>` : ''}</span></div>`;
   if(rt) h += `<div class="kv ${short?'low':''}"><span>Lasts</span><span>${esc(rt)}</span></div>`;
@@ -3434,14 +3795,237 @@ function parseBackup(text){
   return {compounds, logs: Array.isArray(logs)?logs:[], activeWorkout: d.activeWorkout && Array.isArray(d.activeWorkout.items) ? d.activeWorkout : null,
     labs: Array.isArray(d.labs)?d.labs:[], health: isObj(raw.health) && isObj(raw.health.days) ? d.health : null,
     exercises: Array.isArray(d.exercises)?d.exercises:[], templates: Array.isArray(d.templates)?d.templates:[], workouts: Array.isArray(d.workouts)?d.workouts:[],
-    activities: Array.isArray(d.activities)?d.activities:[], checkins: d.checkins || [], programmes: d.programmes || [], measures: d.measures || [], settings: d.settings||{}, exportedAt: validDate(d.exportedAt) ? d.exportedAt : null};
+    activities: Array.isArray(d.activities)?d.activities:[], checkins: d.checkins || [], programmes: d.programmes || [], measures: d.measures || [], weights: d.weights || [], settings: d.settings||{}, exportedAt: validDate(d.exportedAt) ? d.exportedAt : null};
 }
 function backupSummary(p){
-  return `Found <b>${p.compounds.length}</b> compounds, <b>${p.logs.length}</b> doses, <b>${p.labs.length}</b> lab results, <b>${p.workouts.length}</b> workouts, <b>${p.activities.length}</b> runs/walks/hikes, <b>${(p.checkins||[]).length}</b> check-ins${p.exportedAt?` · saved ${esc(fmtDate(p.exportedAt))} ${esc(fmtTime(p.exportedAt))}`:''}.`;
+  return `Found <b>${p.compounds.length}</b> compounds, <b>${p.logs.length}</b> doses, <b>${p.labs.length}</b> lab results, <b>${p.workouts.length}</b> workouts, <b>${p.activities.length}</b> runs/walks/hikes, <b>${(p.checkins||[]).length}</b> check-ins${(p.weights||[]).length ? `, <b>${p.weights.length}</b> weigh-ins` : ''}${p.exportedAt?` · saved ${esc(fmtDate(p.exportedAt))} ${esc(fmtTime(p.exportedAt))}`:''}.`;
 }
 /* A copy of everything taken just before a restore or import, so it can be undone. */
 const SNAP_KEY = 'inj-data-v2-before-change';
 async function takeSnapshot(what){ try{ await rawSet(SNAP_KEY, JSON.stringify({what, at:new Date().toISOString(), data:db})); }catch(e){} }
+function parseCsv(text){
+  text = text.replace(/^﻿/, '');
+  const first = text.slice(0, text.indexOf('\n') > 0 ? text.indexOf('\n') : text.length);
+  const delim = (first.match(/;/g)||[]).length > (first.match(/,/g)||[]).length ? ';' : ',';
+  const rows = []; let row = [], f = '', q = false;
+  for(let i=0;i<text.length;i++){
+    const ch = text[i];
+    if(q){ if(ch==='"'){ if(text[i+1]==='"'){ f+='"'; i++; } else q = false; } else f += ch; }
+    else if(ch==='"') q = true;
+    else if(ch===delim){ row.push(f); f=''; }
+    else if(ch==='\n' || ch==='\r'){ if(ch==='\r' && text[i+1]==='\n') i++; row.push(f); f=''; if(row.length>1 || row[0]!=='') rows.push(row); row=[]; }
+    else f += ch;
+  }
+  if(f!=='' || row.length){ row.push(f); rows.push(row); }
+  return rows;
+}
+const strongNorm = s => String(s||'').toLowerCase().replace(/\s+/g,' ').trim();
+function strongDuration(v){
+  if(v==null || v==='') return null;
+  if(/^\d+(\.\d+)?$/.test(v.trim())) return +v;                      // seconds
+  let s = 0; const h = v.match(/(\d+)\s*h/), m = v.match(/(\d+)\s*m(?!s)/), sec = v.match(/(\d+)\s*s/);
+  if(h) s += h[1]*3600; if(m) s += m[1]*60; if(sec) s += +sec[1];
+  return s || null;
+}
+/* Strong writes "2024-06-11 07:05:00"; spreadsheets and other exports turn that into "11/06/2024 07:05" (day first, as in
+   Australia/UK), "06/11/2024 7:05 AM" (US) or "Jun 11, 2024 7:05 AM". new Date() guesses (and Safari can't read most of
+   them), so parse explicitly. `order` ('dmy' or 'mdy') is decided once for the whole file by strongDateOrder(). */
+const MON3 = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+function strongTime(rest){
+  const m = String(rest||'').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?m\.?)?/i); if(!m) return [12, 0, 0];
+  let h = +m[1]; const ap = (m[4]||'').toLowerCase();
+  if(ap.startsWith('p') && h < 12) h += 12; if(ap.startsWith('a') && h === 12) h = 0;
+  return [h, +m[2], +(m[3]||0)];
+}
+function strongDate(v, order){
+  const t = String(v||'').trim();
+  let m = t.match(/^(\d{4})-(\d{2})-(\d{2})(.*)$/);
+  if(m) return validDt(+m[1], m[2]-1, +m[3], ...strongTime(m[4]));
+  m = t.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})(.*)$/);
+  if(m){ const a = +m[1], b = +m[2], mdy = order === 'mdy'; return validDt(+m[3], (mdy ? a : b) - 1, mdy ? b : a, ...strongTime(m[4])); }
+  m = t.match(/^([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})(.*)$/);                 // Jun 11, 2024 7:05 AM
+  if(m && MON3[m[1].toLowerCase()] != null) return validDt(+m[3], MON3[m[1].toLowerCase()], +m[2], ...strongTime(m[4]));
+  m = t.match(/^(\d{1,2})\s+([A-Za-z]{3})[a-z]*\.?,?\s+(\d{4})(.*)$/);                  // 11 Jun 2024 07:05
+  if(m && MON3[m[2].toLowerCase()] != null) return validDt(+m[3], MON3[m[2].toLowerCase()], +m[1], ...strongTime(m[4]));
+  return null;
+}
+/* day-first unless some date in the file only makes sense month-first (e.g. 06/13/2024) */
+function strongDateOrder(values){
+  let dmy = false, mdy = false;
+  for(const v of values){ const m = String(v||'').trim().match(/^(\d{1,2})[\/.](\d{1,2})[\/.]\d{4}/); if(!m) continue; if(+m[1] > 12) dmy = true; if(+m[2] > 12) mdy = true; }
+  return mdy && !dmy ? 'mdy' : 'dmy';
+}
+function validDt(y, mo, d, h, mi, s){ const x = new Date(y, mo, d, h, mi, s); return x.getFullYear()===y && x.getMonth()===mo && x.getDate()===d ? x : null; }
+/* ================= Dose log as a spreadsheet (CSV) =================
+   Both editions. Export: one row per dose, readable by Excel, Sheets and the import below. Import: a CSV from
+   another TRT app or a spreadsheet. Columns are found by their headings (date and time, compound, dose, unit, site,
+   notes), so most exports work as they are. Each name in the file is linked to a compound you already have, or
+   kept as history only (it shows under History > Removed). Nothing is deducted from stock: these doses are past. */
+const DOSE_COLS = {
+  date:['date','date/time','date & time','datetime','date time','timestamp','taken','taken at','logged at','injection date','dose date','when'],
+  time:['time','time taken','injection time'],
+  name:['compound','medication','medicine','drug','substance','product','name','compound name','medication name','item'],
+  dose:['dose','amount','dosage','quantity','qty','dose amount'],
+  unit:['unit','units','dose unit','uom'],
+  site:['site','injection site','location','body part','area','spot'],
+  notes:['notes','note','comment','comments','memo'],
+};
+function doseCsvCol(H, key){
+  const names = DOSE_COLS[key];
+  for(const n of names){ const i = H.findIndex(h=>h===n); if(i>=0) return i; }
+  for(const n of names){ const i = H.findIndex(h=>h.startsWith(n+' (') || h.startsWith(n+' [')); if(i>=0) return i; }
+  return -1;
+}
+const DOSE_UNIT = s => { const u = String(s||'').toLowerCase().replace(/[\s.]/g,'').replace('µ','mc').replace('μ','mc');
+  return u==='mg'||u==='milligram'||u==='milligrams' ? 'mg' : u==='mcg'||u==='ug'||u==='microgram'||u==='micrograms' ? 'mcg' : u==='g'||u==='gram'||u==='grams' ? 'g'
+    : u==='iu'||u==='ie' ? 'iu' : u==='units'||u==='unit'||u==='u' ? 'u' : u==='ml'||u==='cc' ? 'ml' : ''; };
+/* a date cell: ISO with a time zone (2026-09-13T07:30:00Z), an Excel serial number (46278.3125), or the forms strongDate reads */
+function doseCsvDate(v, order){
+  const t = String(v||'').trim();
+  if(/^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/i.test(t)){ const d = new Date(t); return isNaN(d) ? null : d; }
+  if(/^\d{5}(\.\d+)?$/.test(t)){ const u = new Date(Math.round((+t - 25569) * 864e5)); return validDt(u.getUTCFullYear(), u.getUTCMonth(), u.getUTCDate(), u.getUTCHours(), u.getUTCMinutes(), u.getUTCSeconds()); }
+  return strongDate(t, order);
+}
+const csvText = v => String(v==null ? '' : v).trim().replace(/^'(?=[=+\-@])/, '');
+/* → {rows:[{date, name, nk, amount, unit, site, notes}], names:{nk:{name,count}}, skipped:{baddate, nodose, future}} */
+function parseDoseCsv(text){
+  const rows = parseCsv(text);
+  if(rows.length < 2) throw new Error('The file is empty.');
+  const H = rows[0].map(h=>String(h||'').trim().toLowerCase().replace(/\s+/g,' '));
+  const c = {}; Object.keys(DOSE_COLS).forEach(k=>{ c[k] = doseCsvCol(H, k); });
+  if(c.date<0 || c.name<0 || c.dose<0) throw new Error('Couldn’t find the date, compound and dose columns. The first row needs headings such as Date, Compound and Dose.');
+  const headUnit = DOSE_UNIT((H[c.dose].match(/[(\[]\s*([^)\]]+)[)\]]/)||[])[1]);
+  const dateOrder = strongDateOrder(rows.slice(1).map(r=>r[c.date]));
+  const out = [], names = Object.create(null), skipped = {baddate:0, nodose:0, future:0};
+  const soon = Date.now() + 36e5;
+  for(const r of rows.slice(1)){
+    const name = csvText(r[c.name]); if(!name) continue;
+    const when = doseCsvDate(String(r[c.date]||'').trim() + (c.time>=0 && r[c.time] ? ' ' + String(r[c.time]).trim() : ''), dateOrder);
+    if(!when){ skipped.baddate++; continue; }
+    if(+when > soon){ skipped.future++; continue; }
+    const raw = String(r[c.dose]||'').trim().replace(/(\d),(\d)/g, '$1.$2');
+    const m = raw.match(/^(\d+(?:\.\d+)?|\.\d+)\s*([a-zA-Zµμ.]*)/);
+    const amount = m ? parseFloat(m[1]) : NaN;
+    if(!(amount > 0)){ skipped.nodose++; continue; }
+    const unit = DOSE_UNIT(m[2]) || (c.unit>=0 ? DOSE_UNIT(r[c.unit]) : '') || headUnit;
+    const nk = strongNorm(name);
+    out.push({date:when, name, nk, amount, unit, site:c.site>=0 ? csvText(r[c.site]).slice(0,40) : '', notes:c.notes>=0 ? csvText(r[c.notes]).slice(0,500) : ''});
+    const e = names[nk] = names[nk] || {name, count:0, units:Object.create(null)}; e.count++; if(unit) e.units[unit] = 1;
+  }
+  if(!out.length) throw new Error('No doses with a date, compound and amount found in this file.');
+  out.sort((a,b)=>a.date-b.date);
+  return {rows:out, names, skipped};
+}
+function openDoseImport(){
+  openSheet(`<h2>Import doses from a CSV</h2>
+    <p class="small muted" style="margin-top:-8px">From another app or a spreadsheet. The first row needs headings: <b>Date</b> (with the time, or a separate <b>Time</b> column), <b>Compound</b>, <b>Dose</b>, and if you have them <b>Unit</b>, <b>Site</b> and <b>Notes</b>. The file is read on this phone, and you'll see what will be added before anything is saved.</p>
+    <p class="small muted">Tip: add your compounds in ETS first, so the history links to them and counts towards levels and site rotation.</p>
+    <div class="field"><label for="diFile">CSV file</label><input id="diFile" type="file" accept=".csv,text/csv,text/comma-separated-values,text/x-csv,text/x-comma-separated-values,application/csv,text/plain,application/vnd.ms-excel,application/octet-stream"></div>
+    <div id="diReview"></div><div class="form-err" id="diErr" role="alert"></div>`);
+  $('#diFile').addEventListener('change', async e=>{
+    const file = e.target.files[0]; if(!file) return;
+    $('#diErr').textContent = ''; $('#diReview').innerHTML = '';
+    if(file.size > 5e6) return $('#diErr').textContent = 'That file is too big (over 5 MB).';
+    try{ doseImportReview(parseDoseCsv(await file.text())); }
+    catch(ex){ $('#diErr').textContent = (ex && ex.message) || 'Couldn’t read that file.'; }
+  });
+}
+/* the amount in mg (or IU) for compound c, or null when it can't be worked out (mL with no strength) */
+function doseImportMg(row, c){
+  let unit = row.unit || (c && c.unit) || 'mg';
+  if(unit === 'u'){                 // "units": IU for an IU compound, otherwise U-100 syringe units (100 = 1 mL)
+    if(c && c.unit === 'iu') unit = 'iu';
+    else return c && c.strength > 0 ? {mg: row.amount / 100 * c.strength, unit: c.unit || 'mg'} : null;
+  }
+  if(unit === 'ml') return c && c.strength > 0 ? {mg: row.amount * c.strength, unit: c.unit || 'mg'} : null;
+  if(c && c.unit === 'iu' && unit !== 'iu') return null;
+  if(c && c.unit !== 'iu' && unit === 'iu') return null;
+  return {mg: toMg(row.amount, unit), unit: c && c.unit !== 'iu' ? (c.unit || unit) : unit};
+}
+function doseImportReview(data){
+  const existing = db.compounds.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  const byNorm = {}; existing.forEach(c=>{ byNorm[strongNorm(c.name)] = c.id; });
+  Object.entries(db.settings.doseCsvMap||{}).forEach(([nk,id])=>{ if(db.compounds.some(c=>c.id===id)) byNorm[nk] = id; });
+  const list = Object.entries(data.names).sort((a,b)=>b[1].count-a[1].count);
+  const opt = sel => `<option value="">History only (not linked)</option>` + existing.map(c=>`<option value="${esc(c.id)}" ${c.id===sel?'selected':''}>${esc(c.name)}</option>`).join('');
+  const sk = data.skipped;
+  const notes = [sk.baddate && `${sk.baddate} with a date that couldn't be read`, sk.nodose && `${sk.nodose} without an amount`, sk.future && `${sk.future} dated in the future`].filter(Boolean);
+  $('#diReview').innerHTML = `<div class="readout" style="margin-bottom:12px">
+      <div><span>Doses</span><span id="diCount">${data.rows.length}</span></div>
+      <div><span>Compounds</span><span>${list.length}</span></div></div>
+    <p class="small" style="margin:0 0 10px">${esc(fmtDate(data.rows[0].date))} – ${esc(fmtDate(data.rows[data.rows.length-1].date))}${notes.length ? ` · left out: ${notes.join(', ')}` : ''}</p>
+    <div class="card" style="padding:0 14px">${list.map(([nk,e])=>`<div class="list-item" style="display:block">
+      <div class="list-title" style="margin-bottom:6px">${esc(e.name)} <span class="small muted">· ${e.count} ${e.count===1?'dose':'doses'}${Object.keys(e.units).length ? ' · ' + Object.keys(e.units).map(u=>u==='ml'?'mL':u==='u'?'units':uL(u)).join(', ') : ''}</span></div>
+      <select class="di-map" data-nk="${esc(nk)}" aria-label="Import ${esc(e.name)} as">${opt(byNorm[nk])}</select></div>`).join('')}</div>
+    <p class="small muted" id="diWarn" style="margin:10px 0 0"></p>
+    <div class="sheet-actions"><button class="btn btn-block" id="diGo">Import</button></div>`;
+  const plan = () => {
+    const map = {}; document.querySelectorAll('.di-map').forEach(s=>{ map[s.dataset.nk] = s.value; });
+    const have = new Set(db.logs.map(l=>`${l.compoundId}|${Math.floor(+new Date(l.date)/6e4)}`));
+    const add = [], dup = {n:0}, noConv = Object.create(null);
+    for(const r of data.rows){
+      const c = map[r.nk] ? db.compounds.find(x=>x.id===map[r.nk]) : null;
+      const cid = c ? c.id : 'csv:' + r.nk;
+      const k = `${cid}|${Math.floor(+r.date/6e4)}`;
+      if(have.has(k)){ dup.n++; continue; }
+      const amt = doseImportMg(r, c);
+      if(!amt){ noConv[r.name] = (noConv[r.name]||0) + 1; continue; }
+      have.add(k);
+      const strength = c && c.strength > 0 ? c.strength : null;
+      add.push({id:uid(), compoundId:cid, compoundName:c ? c.name : r.name, strength, unit:amt.unit, dose:round(amt.mg, 6),
+        volumeMl: strength ? round(amt.mg/strength, 4) : null, date:r.date.toISOString(), site:r.site, notes:r.notes, src:'csv',
+        ...(c && isOral(c) ? {piece:c.piece||'tablet'} : {})});
+    }
+    return {map, add, dup:dup.n, noConv};
+  };
+  const go = $('#diGo');
+  const refresh = () => {
+    const p = plan(), n = p.add.length;
+    $('#diCount').textContent = n;
+    const w = [];
+    if(p.dup) w.push(`${p.dup} already in your log (or repeated in the file at the same minute), skipped.`);
+    Object.entries(p.noConv).forEach(([name,k])=>w.push(`${k} ${esc(name)} ${k===1?'dose':'doses'} can't be converted: amounts in mL or syringe units need a compound with a strength, and IU can't become mg. Link ${k===1?'it':'them'} to a compound in ETS with the right strength and unit.`));
+    $('#diWarn').innerHTML = w.join(' ');
+    go.textContent = n ? `Import ${n} ${n===1?'dose':'doses'}` : 'Nothing to import'; go.disabled = !n;
+  };
+  document.querySelectorAll('.di-map').forEach(s=>s.addEventListener('change', refresh));
+  refresh();
+  go.addEventListener('click', ()=>{
+    const p = plan(); if(!p.add.length) return;
+    takeSnapshot('CSV dose import');
+    db.logs.push(...p.add);
+    db.settings.doseCsvMap = Object.assign({}, db.settings.doseCsvMap||{}, ...Object.entries(p.map).filter(([,id])=>id).map(([nk,id])=>({[nk]:id})));
+    save(); closeSheet(); ui.mode = 'inj'; ui.tab = 'history'; ui.histFilter = 'all'; render();
+    toast(`Imported ${p.add.length} ${p.add.length===1?'dose':'doses'}`, {label:'Undo', fn:undoSnapshot});
+  });
+}
+const csvCell = v => { const t = v==null ? '' : String(v); return /[",\n\r]/.test(t) || /^[=+\-@]/.test(t) ? '"' + (/^[=+\-@]/.test(t) ? "'" : '') + t.replace(/"/g,'""') + '"' : t; };
+function doseCsvText(){
+  const byId = {}; db.compounds.forEach(c=>{ byId[c.id] = c; });
+  const pad = n => String(n).padStart(2,'0');
+  const rows = db.logs.filter(l=>!l.skipped).slice().sort((a,b)=>+new Date(a.date) - +new Date(b.date)).map(l=>{
+    const d = new Date(l.date), c = byId[l.compoundId], unit = l.unit || (c && c.unit) || 'mg';
+    return [`${ymd(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`, c ? c.name : (l.compoundName || ''), round(fromMg(l.dose, unit), 4), uL(unit),
+      l.volumeMl > 0 ? round(l.volumeMl, 3) : '', l.site || '', l.notes || ''].map(csvCell).join(',');
+  });
+  return '﻿' + ['Date,Compound,Dose,Unit,Volume (mL),Site,Notes', ...rows].join('\r\n') + '\r\n';
+}
+async function exportDoseCsv(){
+  if(!db.logs.some(l=>!l.skipped)) return toast('No doses logged yet.');
+  const text = doseCsvText(), name = `ets-doses-${ymd(new Date())}.csv`;
+  const FS = plugin('Filesystem'), Share = plugin('Share');
+  if(FS && Share){
+    try{
+      const r = await FS.writeFile({path:name, data:text, directory:'CACHE', encoding:'utf8'});
+      suppressLockOnce();
+      await Share.share({title:'Dose log', text:'Dose log (CSV)', files:[r.uri], dialogTitle:'Save or send the dose log'});
+      return;
+    }catch(e){ if(String(e && e.message).match(/cancel/i)) return; }
+  }
+  if(webApp()){ if(await webSaveFile(new Blob([text], {type:'text/csv'}), name, 'Dose log')) toast('Dose log saved'); return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], {type:'text/csv'})); a.download = name;
+  document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
 async function snapshotInfo(){ try{ const r = await rawGet(SNAP_KEY); if(!r) return null; const o = JSON.parse(r); return o && o.data ? o : null; }catch(e){ return null; } }
 async function undoSnapshot(){
   const o = await snapshotInfo(); if(!o) return toast('Nothing to undo.');
@@ -3452,13 +4036,13 @@ async function undoSnapshot(){
 /* Replace everything with a parsed backup. Settings that belong to this phone (lock, reminders, band, Google account…) stay. */
 function applyBackup(parsed){
   takeSnapshot('restore');
-  db.compounds = parsed.compounds; db.logs = parsed.logs; db.labs = parsed.labs; db.checkins = parsed.checkins || []; db.programmes = parsed.programmes || []; db.measures = parsed.measures || []; db.health = parsed.health || {days:{}};
+  db.compounds = parsed.compounds; db.logs = parsed.logs; db.labs = parsed.labs; db.checkins = parsed.checkins || []; db.programmes = parsed.programmes || []; db.measures = parsed.measures || []; db.weights = parsed.weights || []; db.health = parsed.health || {days:{}};
   db.exercises = parsed.exercises; db.templates = parsed.templates; db.workouts = parsed.workouts; db.activities = parsed.activities;
   
   db.activeActivity = null; db.activeWorkout = parsed.activeWorkout; ui.draft = null; ui.tplEdit = null; ui.mode = 'inj';
   // these belong to this phone: privacy and security choices, its band, Google account, watch-data link, calendar export
   const PHONE_KEYS = ['lockEnabled','lockAfter','autoBackup','lastBackupAt','lastBackupFile','lastBackupError','reminders','secureScreen','privateNotifs','launcherShare','launcherNames',
-    'health','hr','gdrive','backupCrypto','purgePlainLocal','purgePlainDrive','calUntil','calSig','calCount','calNudgeOff','installHintOff'];
+    'health','hr','gdrive','backupCrypto','purgePlainLocal','purgePlainDrive','calUntil','calSig','calCount','calNudgeOff','installHintOff','usage','usageStats','usageNoticeAt','usageNoticeDone'];
   const local = {}, seeded = !!db.settings.tplSeeded;
   PHONE_KEYS.forEach(k=>{ if(k in db.settings) local[k] = db.settings[k]; });
   const fromBackup = Object.assign({}, parsed.settings); PHONE_KEYS.forEach(k=>{ delete fromBackup[k]; });
@@ -4042,7 +4626,7 @@ function scheduleAutoBackup(){ clearTimeout(backupTimer); backupTimer = setTimeo
 async function autoBackup(force){
   const FS = plugin('Filesystem'); if(!FS) return false;
   if(!force && !db.settings.autoBackup) return false;
-  if(!db.compounds.length && !db.logs.length && !db.labs.length && !(db.workouts||[]).length && !(db.activities||[]).length && !Object.keys((db.health&&db.health.days)||{}).length) return false;
+  if(!db.compounds.length && !db.logs.length && !db.labs.length && !(db.workouts||[]).length && !(db.activities||[]).length && !(db.weights||[]).length && !Object.keys((db.health&&db.health.days)||{}).length) return false;
   const name = `ets-backup-${ymd(new Date())}.json`;
   let data;
   const write = () => FS.writeFile({path:`${BACKUP_DIR}/${name}`, data, directory:'DOCUMENTS', encoding:'utf8', recursive:true});
@@ -4298,6 +4882,7 @@ document.addEventListener('click', e=>{
     case 'skip': { const sl = a.dataset.slot==='0' ? 0 : a.dataset.slot==='1' ? 1 : undefined;
       if(a.dataset.day) skipDose(id, a.dataset.day, sl); else armButton(a, 'Confirm skip', ()=>skipDose(id, undefined, sl)); } break;
     case 'compound-add': openCompoundSheet(); break;
+    case 'search': openSearch(); break;
     case 'backup-pass': openBackupPassword(); break;
     case 'skip-all': skipAllMissed(id); break;
     case 'cycle-next': closeSheet(); openNextCycleSheet(id); break;
@@ -4316,6 +4901,9 @@ document.addEventListener('click', e=>{
     } break;
     case 'checkin-open': openCheckinSheet(a.dataset.day); break;
     case 'checkin-skip': db.settings.checkinSkip = ymd(new Date()); save(); render(); break;
+    case 'usage-ok': db.settings.usageNoticeDone = true; save(); render(); setTimeout(usageTick, 500); break;
+    case 'usage-off': db.settings.usageStats = false; db.settings.usageNoticeDone = true; save(); render(); toast('Usage count turned off. Turn it back on in Setup > App settings.'); break;
+    case 'usage-show': openUsageSheet(); break;
     case 'feel-pick': ui.feel = a.dataset.k; render(); break;
     case 'stock-edit': openStockSheet(id, a.dataset.line); break;
     case 'stock-ordered': { const c = db.compounds.find(x=>x.id===id); if(c){ c.orderedAt = ymd(new Date()); save(); render(); toast('Marked as ordered. Add the vials when they arrive.'); } } break;
@@ -4338,6 +4926,8 @@ document.addEventListener('click', e=>{
     
     case 'export': exportBackup(); break;
     case 'import': openImport(); break;
+    case 'dose-import': openDoseImport(); break;
+    case 'dose-export': exportDoseCsv(); break;
     case 'rem-test': testNotification(); break;
     case 'backup-now': backupNow(); break;
     case 'report': openReportSheet(); break;
@@ -4347,6 +4937,10 @@ document.addEventListener('click', e=>{
     case 'cal-nudge-off': db.settings.calNudgeOff = true; save(); render(); break;
     case 'install-hint-off': db.settings.installHintOff = true; save(); render(); break;
     case 'web-reload': webReload(); break;
+    
+    
+    
+    
     
     
     
@@ -4424,6 +5018,8 @@ document.addEventListener('change', e=>{
   
   else if(t.id==='setLow'){ const n = parseInt(t.value,10); if(n>=0){ db.settings.lowStockDoses = n; save(); } }
   else if(t.id==='setCheckin'){ db.settings.checkin = t.checked; save(); }
+  else if(t.id==='setUsage'){ db.settings.usageStats = t.checked; db.settings.usageNoticeDone = true; save(); if(t.checked) setTimeout(usageTick, 500); }
+  else if(t.id==='setWUnit'){ db.settings.wUnit = t.value; save(); render(); }
   else if(t.id==='setCiRem'){ db.settings.checkinRemind = t.checked; save(); if(t.checked) askNotifPermission(); toast(t.checked ? 'Check-in reminder at your night time' : 'Check-in reminder off'); }
   else if(t.id==='setPlanNotif'){ db.settings.planNotifs = t.checked; save(); if(t.checked) askNotifPermission(); }
   else if(t.id==='setLead'){ const n = parseInt(t.value,10); if(n>=0 && n<=120){ db.settings.leadDays = n; save(); } else t.value = leadDays(); }
@@ -4452,6 +5048,8 @@ document.addEventListener('focusin', e=>{
 });
 document.addEventListener('keydown', e=>{
   if(e.key==='Escape' && sheetOpen) closeSheet();
+  // keyboards (tablets, the web app): / or Ctrl+K opens search, unless you're typing somewhere
+  if(!sheetOpen && !e.altKey && ((e.key==='/' && !e.ctrlKey && !e.metaKey) || (e.key.toLowerCase()==='k' && (e.ctrlKey || e.metaKey))) && !(e.target && e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) && $('#lockScreen').hidden){ e.preventDefault(); openSearch(); }
   // tappable rows act like buttons for keyboards and switch access
   if((e.key==='Enter' || e.key===' ') && e.target && e.target.matches && e.target.matches('.tap-row[role=button]')){ e.preventDefault(); e.target.click(); }
   // body map sites are SVG groups (no .click() of their own)
@@ -4543,6 +5141,7 @@ async function cleanShareCache(){
   }catch(e){}
 }
 load().then(async ()=>{
+  setTimeout(usageTick, 3000);
   
   applySecureScreen();
   setTimeout(cleanShareCache, 5000);

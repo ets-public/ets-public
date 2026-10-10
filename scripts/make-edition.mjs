@@ -73,8 +73,9 @@ function makeWeb(edition, src, out, opts) {
   const info = { version: opts.version || 'dev', edition, siteUrl: opts.site || '', ...(opts.version ? { built: new Date().toISOString().slice(0, 10) } : {}), ...(opts.platform === 'web' ? { platform: 'web' } : {}) };
   if (edition === 'premium' && opts.keys) info.licenceKeys = JSON.parse(opts.keys);
   writeFileSync(join(out, 'build-info.js'), `window.ETS_BUILD = ${JSON.stringify(info)};\n`);
-  // the premium app talks to the licence server: allow it in the page's security policy
-  if (edition === 'premium' && /^https:\/\/[\w.-]+$/.test(info.siteUrl || '')) {
+  // the app talks to the licence server (the full app: licences and updates; every edition: the anonymous daily usage
+  // count, which the user can turn off): allow it in the page's security policy
+  if (/^https:\/\/[\w.-]+$/.test(info.siteUrl || '')) {
     const ip = join(out, 'index.html');
     writeFileSync(ip, readFileSync(ip, 'utf8').replace("connect-src 'self'", `connect-src 'self' ${info.siteUrl}`));
   }

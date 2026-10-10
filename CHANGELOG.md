@@ -2,6 +2,20 @@
 
 Every version, newest first. Training, blood tests and health need a licence; everything else is in the free edition.
 
+## 1.0.6 · 11 Oct 2026
+
+### Licence
+
+- Garmin watches: pick Garmin in Health > Setup for step-by-step setup through Garmin Connect and Health Connect; resting heart rate is worked out from your heart rate readings, as Garmin doesn't share it
+- Live heart rate: setup help for Garmin's Broadcast Heart Rate
+- Health > Body has a Weight card with your trend, a chart, Log weight and a weigh-in history; your weigh-ins feed BMI, calories and the weekly report
+- Weight history from all your devices: your whole weight history in Health Connect (up to 10 years, from every app and scale, not just Health Connect's preferred one) shows on Health > Body, with 30 days / 90 days / 1 year / All ranges and where each reading came from; Setup warns if Health Connect's Access past data is off
+
+### Both editions
+
+- Daily weigh-ins: enter your weight in the daily check-in (just the weight is fine), in kg, lb or stones and pounds (Setup > Check-in)
+- Anonymous usage count: once a day the app sends an anonymous count (version and how many days it was opened, no ID or data), so we know how many phones use it. See exactly what's sent, or turn it off, in Setup > App settings
+
 ## 1.0.5 · 2 Oct 2026
 
 ### Licence
