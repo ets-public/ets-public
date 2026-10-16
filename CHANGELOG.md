@@ -2,12 +2,35 @@
 
 Every version, newest first. Training, blood tests and health need a licence; everything else is in the free edition.
 
+## 1.0.7 · 16 Oct 2026
+
+### Licence
+
+- Assistant: a chat in the top bar that looks things up in your log. Ask in your own words what's due, your stock, where to inject next, your last doses or blood tests, what to train today, a lift's best and last sessions, your sleep, readiness or weight, or where something is in the app, and get short answers, tables and buttons that open the right screen. It runs on your phone and sends nothing anywhere. Now and then it asks about a dose from yesterday that isn't logged or says it's time to reorder, but never between 9pm and 9am and at most once a day. Questions about doses, symptoms or what a result means get pointed to your doctor: it never gives medical advice
+- Rewind: your whole journey on one timeline (Training > History or Health > Overview). Drag back to any day to see your body weight, lifts, muscle map and progress photo as they were then, with milestones along the way. Step from one milestone to the next, play it through, compare any two days with a photo slider, and share a then-and-now image or a timelapse video of your progress photos (photos, dates, weight and lifts only)
+- Chapters (Training > History or Health > Overview): your history split into chapters wherever your protocol or training programme changed. Each shows what you logged and what happened over it, per week: body weight, estimated maxes, training, recovery, check-ins and blood tests, with the first and last progress photo. Compare any two side by side, rename, join or split them, and open one in Rewind
+- Photo booth (Health > Body): progress photos that line up. Last time's photo sits over the camera as an outline so you stand in the same spot; a level shows when the phone is straight and a light check says if the room is darker or brighter than last time. Front, side and back in one go, hands-free with a timer. It works in the iPhone web app too
+- Check-in for your coach (Health > Weekly): one image of your week from what you've logged, ready to send: progress photos beside the last ones, body weight, training, recovery, check-in scores and a note. Your protocol and blood tests go in only if you switch them on
+- Import progress photos in bulk (Health > Body > Import from your photos): choose lots at once, including from Google Photos, and each one goes on the day it was taken. Check the dates and poses before saving; the photos stay on your phone
+- Catch-up workout (Training > Workout): a workout for the muscles you've trained least lately or that are furthest from this week's targets. 5 × 5 by default with weights from your last sessions; swap, add or remove exercises, supersets, one-tap presets, sore muscles rested, and fewer sets on a low-readiness day
+- Weekly muscle targets: choose how many sets a week each muscle gets. The muscle map shows each muscle against its target, furthest behind first, and after a workout you see each muscle's week before and after
+- On-device AI on phones with Gemini Nano (such as the Pixel 9): read a report from any lab, a scan or a photo; log a dose or a workout in your own words; read a vial label; suggest an exercise's muscles; your week in words; ask questions about your log; paste a programme; suggest the pose of imported progress photos. It runs on the phone, nothing is sent anywhere, nothing is saved without you, and it never gives advice
+- Health Connect setup names the apps your readings come from
+
+### Both editions
+
+- Needs Android 9 or newer. Phones on Android 8 aren't offered this update, and the version they have keeps working
+- Anonymous usage count: nothing is sent until you tap Allow when the app asks. Choose Allow or No thanks, and change your mind any time in Setup > App settings
+- The demo uses made-up sample compounds with round amounts, and says clearly that it isn't a suggested plan
+- Dose log spreadsheet export is safer to open in Excel or Sheets
+- The bottom tabs on phones sit inside the screen edges
+
 ## 1.0.6 · 11 Oct 2026
 
 ### Licence
 
-- Garmin watches: pick Garmin in Health > Setup for step-by-step setup through Garmin Connect and Health Connect; resting heart rate is worked out from your heart rate readings, as Garmin doesn't share it
-- Live heart rate: setup help for Garmin's Broadcast Heart Rate
+- More watches through Health Connect: step-by-step setup in Health > Setup; resting heart rate is worked out from your heart rate readings when a watch doesn't share it
+- Live heart rate: setup help for watches that broadcast heart rate
 - Health > Body has a Weight card with your trend, a chart, Log weight and a weigh-in history; your weigh-ins feed BMI, calories and the weekly report
 - Weight history from all your devices: your whole weight history in Health Connect (up to 10 years, from every app and scale, not just Health Connect's preferred one) shows on Health > Body, with 30 days / 90 days / 1 year / All ranges and where each reading came from; Setup warns if Health Connect's Access past data is off
 - Muscle map: sets per muscle over the last 7 days, 2 weeks or 30 days on a front and back figure, with anything you haven't trained (Training > Workout); change an exercise's muscles in Training > Setup > Exercises

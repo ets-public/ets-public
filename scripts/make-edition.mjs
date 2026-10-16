@@ -119,8 +119,9 @@ function makePwa(out, info) {
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: no-referrer
-  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), bluetooth=()
+  Permissions-Policy: camera=(self), microphone=(), geolocation=(), payment=(), usb=(), bluetooth=()
   Strict-Transport-Security: max-age=31536000
+  X-Robots-Tag: noindex
 /sw.js
   Cache-Control: no-cache
 /manifest.webmanifest
@@ -130,13 +131,15 @@ function makePwa(out, info) {
 /
   Cache-Control: no-cache
 `);
+  // the app isn't a page for search engines (the website is): without this, crawlers get the app for /robots.txt and /sitemap.xml
+  writeFileSync(join(out, 'robots.txt'), 'User-agent: *\nDisallow: /\n');
   // offline: cache every file of this version; a new version installs in the background and the app offers a reload
   const files = [];
   (function walk(rel) {
     for (const f of readdirSync(join(out, rel))) {
       const r = rel ? `${rel}/${f}` : f;
       if (statSync(join(out, r)).isDirectory()) walk(r);
-      else if (!['_headers', 'sw.js'].includes(r) && !/\.map$/.test(r)) files.push(r);
+      else if (!['_headers', 'sw.js', 'robots.txt'].includes(r) && !/\.map$/.test(r)) files.push(r);
     }
   })('');
   files.sort();
@@ -159,20 +162,21 @@ self.addEventListener('fetch', e => {
 `);
 }
 
-const PREMIUM_PLUGINS = ['HealthDataPlugin', 'HeartRatePlugin', 'TrackerPlugin', 'AppUpdatePlugin'];
+const PREMIUM_PLUGINS = ['HealthDataPlugin', 'HeartRatePlugin', 'TrackerPlugin', 'AppUpdatePlugin', 'OnDeviceAIPlugin'];
+const PREMIUM_DEPS = ['implementation "androidx.health.connect:connect-client:1.1.0"', 'implementation "com.google.mlkit:genai-prompt:1.0.0-beta4"', 'implementation "com.google.mlkit:text-recognition:16.0.1"'];
 export function freeManifest(xml) {
   const drop = [
     /\s*<intent-filter>\s*<action android:name="androidx\.health\.ACTION_SHOW_PERMISSIONS_RATIONALE"\s*\/>\s*<\/intent-filter>/g,
     /\s*<activity-alias[\s\S]*?<\/activity-alias>/g,
     /\s*<service\s+android:name="\.(HrService|TrackService)"[\s\S]*?\/>/g,
-    /\s*<!-- (Live heart rate|GPS routes|Health Connect|In-app updates)[^>]*-->/g,
+    /\s*<!-- (Live heart rate|GPS routes|Health Connect|In-app updates|Photo booth)[^>]*-->/g,
     /\s*<uses-permission android:name="android\.permission\.REQUEST_INSTALL_PACKAGES"[^>]*\/>/g,
-    /\s*<uses-feature android:name="android\.hardware\.(bluetooth_le|location\.gps)"[^>]*\/>/g,
-    /\s*<uses-permission android:name="android\.permission\.(BLUETOOTH\w*|ACCESS_(FINE|COARSE)_LOCATION|FOREGROUND_SERVICE\w*|health\.\w+)"[^>]*\/>/g,
+    /\s*<uses-feature android:name="android\.hardware\.(bluetooth_le|location\.gps|camera)"[^>]*\/>/g,
+    /\s*<uses-permission android:name="android\.permission\.(BLUETOOTH\w*|ACCESS_(FINE|COARSE)_LOCATION|FOREGROUND_SERVICE\w*|CAMERA|health\.\w+)"[^>]*\/>/g,
     /\s*<queries>[\s\S]*?<\/queries>/g,
   ];
   for (const re of drop) xml = xml.replace(re, '');
-  if (/health|BLUETOOTH|LOCATION|HrService|TrackService|INSTALL_PACKAGES/.test(xml)) throw new Error('free manifest still mentions a premium permission or service');
+  if (/health|BLUETOOTH|LOCATION|CAMERA|HrService|TrackService|INSTALL_PACKAGES/.test(xml)) throw new Error('free manifest still mentions a premium permission or service');
   return xml;
 }
 function makeAndroid(edition) {
@@ -192,12 +196,15 @@ function makeAndroid(edition) {
   let xml = readFileSync(tmpl, 'utf8');
   if (edition === 'free') xml = freeManifest(xml);
   writeFileSync(mfPath, xml);
-  // Health Connect library only in the premium app
+  // libraries only the premium app uses: Health Connect, and Gemini Nano (ML Kit GenAI Prompt) with ML Kit text recognition.
+  // Each is added once (after Capacitor's own line) and commented out for the free app.
   const gradle = join(ROOT, 'android', 'app', 'build.gradle');
   let g = readFileSync(gradle, 'utf8');
-  const dep = 'implementation "androidx.health.connect:connect-client:1.1.0"';
-  const off = '// (premium only) ' + dep;
-  g = edition === 'free' ? g.replace(new RegExp(`(?<!// \\(premium only\\) )${dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), off) : g.replace(off, dep);
+  for (const dep of PREMIUM_DEPS) {
+    const off = '// (premium only) ' + dep, esc = dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!g.includes(dep)) g = g.replace(/^([ \t]*)implementation project\(':capacitor-android'\)/m, (m, ind) => `${m}\n${ind}${dep}`);
+    g = edition === 'free' ? g.replace(new RegExp(`(?<!// \\(premium only\\) )${esc}`), off) : g.replace(off, dep);
+  }
   writeFileSync(gradle, g);
   console.log(`android: ${edition} edition native code and manifest in place`);
 }

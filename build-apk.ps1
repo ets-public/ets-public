@@ -112,6 +112,10 @@ try {
   Set-Content $mf $xml -NoNewline
 
   "sdk.dir=$($sdk -replace '\\','\\')" | Set-Content android\local.properties
+  # Android 9 (API 28) or newer: older phones stop getting updates from 1.0.7, and every phone left
+  # understands the rotated release key, so the original key isn't needed to install an update
+  $vg = 'android\variables.gradle'
+  (Get-Content $vg -Raw) -replace 'minSdkVersion\s*=\s*\d+', 'minSdkVersion = 28' | Set-Content $vg -NoNewline
 
   # --- Release signing ---------------------------------------------------------
   # Uses the same key the first (debug) build was signed with, so this installs as an

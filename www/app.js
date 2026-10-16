@@ -285,6 +285,7 @@ async function load(){
   db.templates = Array.isArray(data.templates) ? data.templates : [];
   db.workouts = Array.isArray(data.workouts) ? data.workouts : [];
   db.activities = Array.isArray(data.activities) ? data.activities : [];
+  db.assistant = isObj(data.assistant) ? data.assistant : null;   // the assistant's chats (licence edition)
   db.activeActivity = data.activeActivity && data.activeActivity.kind ? data.activeActivity : null;
   db.activeWorkout = data.activeWorkout && Array.isArray(data.activeWorkout.items) ? data.activeWorkout : null;
   db.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings || {});
@@ -948,6 +949,7 @@ function openSiteSheet(name){
    In the premium edition those sections also need an active licence. */
 const REST_NOTIF_ID = 1900000001;
 const WEEKLY_NOTIF_ID = 1900000301;
+const ASSIST_NOTIF_ID = 1900000302;   // the assistant's morning follow-up
 const INJ_TABS = [['today','Today'],['calendar','Calendar'],['history','History'],['stock','Stock'],['labs','Labs'],['setup','Setup']];
 
 
@@ -1078,6 +1080,7 @@ function render(){
   
   if(ui.tab!=='app' && !tabsFor(ui.mode).some(t=>t[0]===ui.tab)) ui.tab = FIRST_TAB[ui.mode];
   renderTabbar();
+  
   $('#pageTitle').textContent = TAB_META[ui.tab].title;
   const sub = $('#pageSub'), meta = $('#pageMeta'), top = $('#topAction');
   meta.textContent = ''; meta.style.color = '';
@@ -1806,6 +1809,8 @@ const SEARCH_FEATURES = [
   {id:'workout', t:'Start a workout', w:'Training › Workout', k:'gym lift lifting session train exercise begin', p:'train', go:{m:'train', tab:'workout'}},
   {id:'pastwk', t:'Log a past workout', w:'Training › History', k:'yesterday forgot add missed earlier session', p:'train', go:{m:'train', tab:'thistory', act:'wk-past'}},
   {id:'cardio', t:'Run, walk, hike or treadmill', w:'Training › Workout', k:'cardio gps running jog walk hike treadmill route distance pace', p:'train', opt:1, go:{m:'train', tab:'workout', label:'Cardio'}},
+  {id:'chapters', t:'Chapters: your history in phases', w:'Training › History', k:'chapters phases blocks cycles blast cruise compare cycle protocol periods programme what changed side by side', p:'train', go:{m:'train', tab:'thistory', act:'chapters'}},
+  {id:'rewind', t:'Rewind: your journey', w:'Training › History', k:'rewind time machine timeline journey then and now before after progress compare history look back months ago year ago transformation share milestones timelapse video photos poses', p:'train', go:{m:'train', tab:'thistory', act:'rewind'}},
   {id:'thistory', t:'Training history', w:'Training › History', k:'past workouts sessions log runs', p:'train', go:{m:'train', tab:'thistory'}},
   {id:'records', t:'Personal bests', w:'Training › Records', k:'pr pb records one rep max 1rm e1rm strongest best lift', p:'train', go:{m:'train', tab:'records'}},
   {id:'templates', t:'Workout templates', w:'Training › Templates', k:'routine plan split program workout plan push pull legs', p:'train', go:{m:'train', tab:'templates'}},
@@ -1813,25 +1818,34 @@ const SEARCH_FEATURES = [
   {id:'programme', t:'Programmes and deload weeks', w:'Training › Workout', k:'program programme block periodisation deload weeks plan progression', p:'train', go:{m:'train', tab:'workout', act:'prog-new'}},
   {id:'muscles', t:'Muscles worked (muscle map)', w:'Training › Workout', k:'muscle map body heatmap volume sets per week weekly undertrained balance chest back legs arms shoulders lagging', p:'train', opt:1, go:{m:'train', tab:'workout', label:'Muscles worked'}},
   {id:'exmuscles', t:'Set an exercise\u2019s muscles', w:'Training › Setup › Exercises', k:'muscles worked exercise target primary secondary main helping', p:'train', go:{m:'train', tab:'setup', act:'tr-exlib'}},
+  {id:'aiprog', t:'Paste a programme', w:'Training › Templates', k:'ai import plan program programme coach pdf paste copy templates', p:'train', on:'native', go:{m:'train', tab:'templates', act:'ai-prog'}},
+  {id:'catchup', t:'Catch-up workout', w:'Training › Workout', k:'catch up lagging neglected untrained muscles suggested workout generate plan recommend least trained balance supersets presets favourite exercise never suggest swap', p:'train', opt:1, go:{m:'train', tab:'workout', label:'Catch-up workout'}},
+  {id:'mtargets', t:'Weekly muscle targets', w:'Training › Workout', k:'target sets per week muscle volume goal how many sets weekly hypertrophy', p:'train', go:{m:'train', tab:'workout', act:'mt-open'}},
+  {id:'sore', t:'Sore muscles today', w:'Training › Workout › Catch-up workout', k:'sore doms aching stiff rest muscle recovery', p:'train', go:{m:'train', tab:'workout', act:'cu-sore'}},
   {id:'rest', t:'Rest timer', w:'Training › Setup', k:'rest time between sets timer countdown seconds', p:'train', go:{m:'train', tab:'setup', act:'tr-defrest'}},
   {id:'progression', t:'Weight jump for progression', w:'Training › Setup', k:'increment increase kg progressive overload suggestion', p:'train', go:{m:'train', tab:'setup', sel:'#setTrInc'}},
   {id:'exlib', t:'Exercises', w:'Training › Setup', k:'exercise library list add custom movement', p:'train', go:{m:'train', tab:'setup', act:'tr-exlib'}},
   {id:'strong', t:'Import from Strong', w:'Training › Setup', k:'strong app csv import workouts history transfer hevy', p:'train', go:{m:'train', tab:'setup', act:'tr-strong'}},
-  {id:'hrlive', t:'Live heart rate (Bluetooth)', w:'Health › Setup', k:'heart rate monitor chest strap polar bluetooth band hr zones live bpm', p:'health', on:'native', go:{m:'health', tab:'setup', label:'Live heart rate'}},
+  {id:'hrlive', t:'Live heart rate (Bluetooth)', w:'Health › Setup', k:'heart rate monitor chest strap bluetooth band watch broadcast hr zones live bpm', p:'health', on:'native', go:{m:'health', tab:'setup', label:'Live heart rate'}},
   // Health
   {id:'hoverview', t:'Health overview', w:'Health', k:'watch data readiness today recovery', p:'health', on:'native', go:{m:'health', tab:'hoverview'}},
   {id:'readiness', t:'Readiness score', w:'Health › Overview', k:'recovery ready train today score hrv sleep', p:'health', on:'native', go:{m:'health', tab:'hoverview', act:'rd-open'}},
   {id:'trends', t:'Watch data trends', w:'Health › Trends', k:'charts sleep resting heart rate hrv steps spo2 blood oxygen calories blood pressure', p:'health', on:'native', go:{m:'health', tab:'htrends'}},
+  {id:'coach', t:'Check-in for your coach', w:'Health › Weekly', k:'coach check in weekly update send share photos weight training prep report image', p:'health', go:{m:'health', tab:'hweek', act:'coach-checkin'}},
   {id:'weekly', t:'Weekly report', w:'Health › Weekly', k:'week summary adherence volume review', p:'health', go:{m:'health', tab:'hweek'}},
   {id:'body', t:'Body profile', w:'Health › Body', k:'height age sex profile bmi body', p:'health', go:{m:'health', tab:'hbody'}},
   {id:'weighin', t:'Weigh in', w:'Health › Body', k:'weight scale bodyweight weigh log kg lb', p:'health', go:{m:'health', tab:'hbody', act:'weight-log'}},
   {id:'weighthist', t:'Weight history', w:'Health › Body', k:'weight trend chart bodyweight scale graph', p:'health', go:{m:'health', tab:'hbody', act:'weight-history'}},
   {id:'measure', t:'Body measurements', w:'Health › Body', k:'waist chest arms tape measure circumference', p:'health', go:{m:'health', tab:'hbody', act:'meas-add'}},
+  {id:'photobooth', t:'Photo booth: progress photos that line up', w:'Health › Body', k:'camera take progress photo booth ghost outline overlay same pose line up level timer hands free front side back check-in physique', p:'health', go:{m:'health', tab:'hbody', act:'photo-booth'}},
+  {id:'photoimport', t:'Import progress photos', w:'Health › Body', k:'import photos google photos gallery album bulk many old pictures progress check-in physique dates', p:'health', go:{m:'health', tab:'hbody', act:'photo-import'}},
   {id:'photos', t:'Progress photos', w:'Health › Body', k:'photo picture compare before after physique', p:'health', go:{m:'health', tab:'hbody', label:'Progress photos'}},
   {id:'macros', t:'Calories and macros', w:'Health › Body', k:'tdee calories macros protein carbs fat diet nutrition targets cut bulk maintenance', p:'health', opt:1, go:{m:'health', tab:'hbody', label:'Daily'}},
   {id:'hrmax', t:'Heart-rate zones and max', w:'Health › Setup', k:'max heart rate zones hr max bpm', p:'health', on:'native', go:{m:'health', tab:'setup', sel:'#setHrMax'}},
-  {id:'hc', t:'Health Connect (watch data)', w:'Health › Setup', k:'garmin fitbit samsung watch wearable health connect sync permissions sleep steps import', p:'health', on:'native', go:{m:'health', tab:'setup', label:'Watch data'}},
+  {id:'hc', t:'Health Connect (watch data)', w:'Health › Setup', k:'watch smartwatch ring scale wearable health connect sync permissions sleep steps import', p:'health', on:'native', go:{m:'health', tab:'setup', label:'Watch data'}},
   // App settings
+  
+  {id:'ai', t:'On-device AI (Gemini Nano)', w:'Setup › App settings', k:'ai gemini nano artificial intelligence smart assistant on device model download', on:'native', go:{tab:'app', label:'On-device AI'}},
   {id:'appset', t:'App settings', w:'Setup', k:'settings preferences options', go:{tab:'app'}},
   {id:'fullapp', t:'What the full app adds', w:'Licence', k:'premium pro full buy price cost upgrade licence license unlock pay purchase key', on:'locked', go:{m:'train', tab:'tpromo'}},
   {id:'dark', t:'Dark mode', w:'Follows your phone', k:'dark light mode theme night colours colors appearance', info:'ETS follows your phone\u2019s light or dark setting. Change it in your phone\u2019s display settings.'},
@@ -1939,17 +1953,21 @@ function openSearch(){
       return;
     }
     shown = searchRun(q, items);
-    if(!shown.length){ $('#srOut').innerHTML = `<div class="card"><div class="empty small">Nothing found for “${esc(q.trim())}”. Try another word, like “weight”, “backup” or a compound’s name.</div></div>`; return; }
+    const askAi = '';
+    if(!shown.length){ $('#srOut').innerHTML = `<div class="card"><div class="empty small">Nothing found for “${esc(q.trim())}”. Try another word, like “weight”, “backup” or a compound’s name.</div></div>` + askAi; return; }
     let html = '', kind = null, i = 0;
     for(const it of shown){
       if(it.kind !== kind){ if(kind) html += '</div>'; html += `<div class="section-label">${esc(it.kind)}</div><div class="card sr-card">`; kind = it.kind; }
       html += searchRowHtml(it, i++);
     }
-    $('#srOut').innerHTML = html + '</div>';
+    $('#srOut').innerHTML = html + '</div>' + askAi;
   };
   $('#srQ').addEventListener('input', draw);
   $('#srQ').addEventListener('keydown', e=>{ if(e.key==='Enter' && shown[0]){ e.preventDefault(); searchGo(shown[0]); } });
-  $('#srOut').addEventListener('click', e=>{ const b = e.target.closest('[data-sr]'); if(b && shown[+b.dataset.sr]) searchGo(shown[+b.dataset.sr]); });
+  $('#srOut').addEventListener('click', e=>{
+    
+    const b = e.target.closest('[data-sr]'); if(b && shown[+b.dataset.sr]) searchGo(shown[+b.dataset.sr]);
+  });
   draw();
   setTimeout(()=>{ const q = $('#srQ'); if(q) q.focus(); }, 60);
 }
@@ -1960,12 +1978,15 @@ function searchGo(it){
   persistQuiet();
   closeSheet();
   if(it.info){ toast(it.info); return; }
-  let g = it.go || {};
+  if(it.p && !premiumOn()){ const g = it.p==='labs' ? {m:'inj', tab:'labs'} : {m:it.p, tab:it.p==='train' ? 'tpromo' : 'hpromo'}; goTo(g); return; }
+  goTo(it.go || {});
+}
+/* go to a place in the app: {m: section, tab, act: an action to press there, data, sel or label to highlight} */
+function goTo(g){
   // a template being edited isn't swapped for another one (its changes would be lost)
   if(ui.tplEdit && (g.act==='tpl-new' || (g.act==='tpl-edit' && g.data && g.data.id!==ui.tplEdit.id))){
     g = {m:'train', tab:'templates'}; setTimeout(()=>toast('Save or cancel the template you\u2019re editing first.'), 300);
   }
-  if(it.p && !premiumOn()) g = it.p==='labs' ? {m:'inj', tab:'labs'} : {m:it.p, tab:it.p==='train' ? 'tpromo' : 'hpromo'};
   if(g.m && g.m !== ui.mode) setMode(g.m);
   if(g.tab){ ui.tab = g.tab; render(); }
   $('#main').scrollTop = 0;
@@ -2013,9 +2034,9 @@ const DEMO_BLOCK = {
 };
 function demoBannerHtml(){
   if(!DEMO) return '';
-  return `<div class="demo-banner" role="note"><span><b>Demo:</b> sample data. Nothing you do here is saved.</span><button type="button" data-action="demo-exit">Exit demo</button></div>`;
+  return `<div class="demo-banner" role="note"><span><b>Demo:</b> made-up sample data, not a suggested plan. Nothing you do here is saved.</span><button type="button" data-action="demo-exit">Exit demo</button></div>`;
 }
-/* sample data, dated from today: 12 weeks of TRT (testosterone cypionate twice a week), an AI and a supplement,
+/* sample data, dated from today: 12 weeks of a sample injectable twice a week, a sample tablet and a supplement (made-up names and round amounts: an example of the app, not of a plan),
    three blood tests, check-ins, a site reaction, stock, and 8 weeks of training */
 function demoData(){
   let seed = 20261002;
@@ -2030,9 +2051,9 @@ function demoData(){
   for(let d = new Date(start); d < today; d = addDays(d, 1)){
     const dow = d.getDay();
     if(dow===1 || dow===4){
-      logs.push({id:'dt'+ymd(d), compoundId:'demoTest', compoundName:'Testosterone cypionate', dose:70, strength:250, unit:'mg', volumeMl:0.28, date:at(d, 7, pick(40, 59)), site:testSites[si++ % testSites.length]});
+      logs.push({id:'dt'+ymd(d), compoundId:'demoTest', compoundName:'Sample injectable', dose:100, strength:250, unit:'mg', volumeMl:0.4, date:at(d, 7, pick(40, 59)), site:testSites[si++ % testSites.length]});
       if(d >= opened) testSinceOpen++;
-      logs.push({id:'da'+ymd(d), compoundId:'demoAI', compoundName:'Anastrozole', dose:0.5, strength:1, unit:'mg', volumeMl:0.5, date:at(d, 20, 5)});
+      logs.push({id:'da'+ymd(d), compoundId:'demoAI', compoundName:'Sample tablet', dose:1, strength:1, unit:'mg', volumeMl:1, date:at(d, 20, 5)});
       if(d >= opened) aiSinceOpen++;
     }
     if(diffDays(today, d) > 0) logs.push({id:'dv'+ymd(d), compoundId:'demoD3', compoundName:'Vitamin D3', dose:5000, strength:5000, unit:'iu', volumeMl:1, date:at(d, 8, 10)});
@@ -2047,7 +2068,7 @@ function demoData(){
     if(day === soreDay) x.site = {logId:sore.id, issues:['sore','lump']};
     checkins.push(x);
   }
-  // blood tests on a dose morning, before the injection (a trough): a baseline before TRT, then two on it
+  // blood tests on a dose morning, before the injection (a trough): a baseline, then two later
   const thu = n => { let d = addDays(today, -n); while(d.getDay()!==4) d = addDays(d, -1); return ymd(d); };
   const lab = (date, marker, value, unit, lo, hi) => labs.push({id:`dl-${date}-${marker}`, marker, value, unit, refLow:lo, refHigh:hi, date, time:'07:00', panel:'Male hormone panel'});
   const base = ymd(addDays(start, -5)), mid = thu(42), last = thu(5);
@@ -2086,11 +2107,11 @@ function demoData(){
   const exp = ymd(addDays(today, 420));
   const out = {
     compounds:[
-      {id:'demoTest', name:'Testosterone cypionate', strength:250, unit:'mg', route:'IM', schedule:{type:'weekly', days:[1,4]}, time:'morning', dosePerInj:70, halfLife:8, barrel:'1 mL', sites:testSites, hlChecked:true,
-        vial:{sizeMl:10, remainingMl:Math.round((10 - testSinceOpen*0.28)*100)/100, openedAt:opened.toISOString(), price:95, batch:'TC-2408', expiry:exp},
-        stock:[{id:'ds1', count:2, sizeMl:10, strength:250, price:95, batch:'TC-2408', expiry:exp}]},
-      {id:'demoAI', name:'Anastrozole', form:'oral', piece:'tablet', strength:1, unit:'mg', route:'Oral', schedule:{type:'weekly', days:[1,4]}, time:'night', dosePerInj:0.5, halfLife:1.9, hlChecked:true,
-        vial:{sizeMl:30, remainingMl:30 - aiSinceOpen*0.5, openedAt:opened.toISOString(), price:24}},
+      {id:'demoTest', name:'Sample injectable', strength:250, unit:'mg', route:'IM', schedule:{type:'weekly', days:[1,4]}, time:'morning', dosePerInj:100, halfLife:8, barrel:'1 mL', sites:testSites, hlChecked:true,
+        vial:{sizeMl:10, remainingMl:Math.round((10 - testSinceOpen*0.4)*100)/100, openedAt:opened.toISOString(), price:95, batch:'S-2408', expiry:exp},
+        stock:[{id:'ds1', count:2, sizeMl:10, strength:250, price:95, batch:'S-2408', expiry:exp}]},
+      {id:'demoAI', name:'Sample tablet', form:'oral', piece:'tablet', strength:1, unit:'mg', route:'Oral', schedule:{type:'weekly', days:[1,4]}, time:'night', dosePerInj:1, halfLife:1.9, hlChecked:true,
+        vial:{sizeMl:30, remainingMl:30 - aiSinceOpen, openedAt:opened.toISOString(), price:24}},
       {id:'demoD3', name:'Vitamin D3', form:'oral', piece:'softgel', supplement:true, strength:5000, unit:'iu', route:'Oral', schedule:{type:'interval', every:1, start:ymd(start)}, time:'morning', dosePerInj:5000, hlChecked:true},
     ],
     logs, labs, checkins, weights, health, exercises:ex, templates, workouts, activities,
@@ -2135,8 +2156,7 @@ async function usageTick(){
   const u = usageState(), now = new Date(), today = ymd(now);
   if(!u.days.includes(today)){ const from = ymd(addDays(now, -27)); u.days = u.days.filter(k=>k >= from).concat(today).slice(-28); save(); }
   if(!usageOn() || usageBusy || u.ping === today) return;
-  const seen = db.settings.usageNoticeDone || (db.settings.usageNoticeAt && Date.now() - Date.parse(db.settings.usageNoticeAt) > 3*DAY);
-  const base = siteLink(''); if(!seen || !base) return;
+  const base = siteLink(''); if(!db.settings.usageNoticeDone || !base) return;    // nothing is sent until you say yes
   const body = usageBody(); usageBusy = true;
   try{
     const r = await fetch(base + '/api/ping', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body), cache:'no-store'});
@@ -2149,19 +2169,19 @@ function usageCardHtml(){
   if(!usageNoticeDue()) return '';
   if(!db.settings.usageNoticeAt){ db.settings.usageNoticeAt = new Date().toISOString(); setTimeout(save, 0); }
   return `<div class="card usage-card"><div class="list-title">Anonymous usage count</div>
-    <p class="small" style="margin:6px 0 10px">To see how many phones use ETS and how often, the app sends one anonymous count a day: the version, and how many days this week it was opened. No ID, nothing you've logged, nothing that identifies you or this phone.</p>
-    <div class="foot-btns"><button class="btn btn-outline" data-action="usage-show">What's sent</button><button class="btn btn-outline" data-action="usage-off">Turn off</button><button class="btn" data-action="usage-ok">OK</button></div></div>`;
+    <p class="small" style="margin:6px 0 10px">To see how many phones use ETS and how often, the app can send one anonymous count a day: the version, and how many days this week it was opened. No ID and nothing you've logged. Nothing is sent unless you tap Allow.</p>
+    <div class="foot-btns"><button class="btn btn-outline" data-action="usage-show">What's sent</button><button class="btn btn-outline" data-action="usage-off">No thanks</button><button class="btn" data-action="usage-ok">Allow</button></div></div>`;
 }
 function openUsageSheet(){
   openSheet(`<h2>Anonymous usage count</h2>
-    <p class="muted" style="margin-top:-6px">At most once a day, when the app is opened and online, it sends exactly this:</p>
+    <p class="muted" style="margin-top:-6px">Only if you allow it: at most once a day, when the app is opened and online, it sends exactly this:</p>
     <pre class="mono small usage-json">${esc(JSON.stringify(usageBody(), null, 1))}</pre>
     <ul class="small" style="padding-left:18px">
       <li><b>ed</b>: which app (free edition, full app, licensed or web app). <b>ver</b>: its version.</li>
       <li><b>d7</b>, <b>d28</b>: how many of the last 7 and 28 days it was opened. <b>age</b>: roughly how long ago it was installed.</li>
       <li><b>first</b>, <b>wk</b>, <b>mo</b>: whether this is the first count from this phone, this week and this month, so phones can be counted without an ID.</li>
     </ul>
-    <p class="small">There's no device ID, licence key, account or anything you've logged, and the server doesn't keep your IP address. It only adds to daily totals. Turn it off any time in Setup > App settings.</p>
+    <p class="small">There's no device ID, licence key, account or anything you've logged, and the server doesn't keep your IP address. It only adds to daily totals. Turn it on or off any time in Setup > App settings.</p>
     <button class="btn btn-block" id="usageClose">Close</button>`);
   $('#usageClose').addEventListener('click', closeSheet);
 }
@@ -2339,7 +2359,7 @@ function renderAppSettings(){
   const lb = s.lastBackupAt ? `${fmtDate(s.lastBackupAt)} ${fmtTime(s.lastBackupAt)}` : 'Never';
   html += `<div class="section-label">Usage count</div><div class="card">
     <div class="switch-row"><div><div class="list-title">Send an anonymous usage count</div><div class="list-sub">Once a day: the app version and how many days this week it was opened. No ID and nothing you've logged.</div></div>
-      <label class="switch"><input type="checkbox" id="setUsage" ${usageOn()?'checked':''} aria-label="Send an anonymous usage count"><span></span></label></div>
+      <label class="switch"><input type="checkbox" id="setUsage" ${usageOn() && db.settings.usageNoticeDone?'checked':''} aria-label="Send an anonymous usage count"><span></span></label></div>
     <button class="btn btn-outline" data-action="usage-show" style="margin-top:8px">See exactly what's sent</button>
   </div>`;
   html += `<div class="section-label">Backup</div><div class="card">
@@ -2414,6 +2434,7 @@ function openCompoundSheet(id, opts={}){
   const so0 = opts.startUsing ? false : opts.stockOnly || !!(ex && ex.stockOnly);
   openSheet(`
     <h2>${ex ? (opts.startUsing ? `Start using ${esc(c.name)}` : 'Edit compound') : so0 ? 'Add to stock' : 'Add compound'}</h2>
+    ${''}
     <div class="field"><label for="cName">Name</label><input id="cName" autocomplete="off" placeholder="e.g. Testosterone cypionate" value="${esc(c.name)}"></div>
     <label class="switch-row" style="margin-bottom:12px"><span><span class="list-title">Stock only</span><br><span class="list-sub">Keep it in Stock for later. No reminders or doses until you start using it${ex && hasSchedule(ex) ? '. Its schedule is kept' : ''}.</span></span><span class="switch"><input type="checkbox" id="cStockOnly" ${so0?'checked':''}><span></span></span></label>
     <div class="field"><span class="field-label">Form</span>${segHtml('cForm',[['oil','Oil / liquid'],['powder','Powder (mix with water)'],['oral','Tablet / capsule']], c.form)}<div class="hint" id="cFormNote" hidden></div></div>
@@ -2501,6 +2522,7 @@ function openCompoundSheet(id, opts={}){
   `);
 
   const f = id => document.getElementById(id);
+  
   let days = new Set(sch.days||[]);
   let unit = c.unit;
   const strength = ()=>{
@@ -2902,6 +2924,7 @@ function openLogSheet(opts={}){
     + (ex && !c ? `<option value="${esc(ex.compoundId)}" selected>${esc(ex.compoundName||'Removed compound')}</option>` : '');
   openSheet(`
     <h2>${ex?'Edit dose':'Log dose'}</h2>
+    ${''}
     <div class="field"><label for="lComp">Compound</label><select id="lComp">${compOpts}</select></div>
     <div class="row2">
       <div class="field"><label for="lDose">Dose (<span id="lUnit">${esc(uL((c&&c.unit)||(ex&&ex.unit)||'mg'))}</span>)</label><input id="lDose" type="number" inputmode="decimal" min="0" step="any"></div>
@@ -2980,6 +3003,7 @@ function openLogSheet(opts={}){
   f('lComp').addEventListener('change', ()=>{ cid = f('lComp').value; c = getC(); f('lUnit').textContent = uL(unitOf()); if(!ex) site=null; renderSites(); prefill(); calc(); });
   f('lDose').addEventListener('input', calc);
   renderSites(); prefill(); calc();
+  
 
   if(ex) f('lDel').addEventListener('click', e=>armButton(e.currentTarget, 'Tap again to delete', ()=>{
     adjustStock(ex.compoundId, ex.volumeMl||0, ex.date);
@@ -3604,6 +3628,7 @@ function openStockSheet(cid, lineId){
   const cw = contW(c), oral = isOral(c);
   openSheet(`<h2>${line ? `Sealed ${cw}s` : `Add ${cw}s`}</h2>
     <p class="muted" style="margin-top:-6px">${esc(c.name)}</p>
+    ${''}
     <div class="field"><label for="sCount">${line ? 'How many you have' : `How many ${cw}s`}</label><input id="sCount" type="number" inputmode="numeric" min="${line?0:1}" max="999" step="1" value="${line ? line.count : 1}"></div>
     ${powder ? `<div class="field"><label for="sPowder">Powder per vial (mg)</label><input id="sPowder" type="number" inputmode="decimal" min="0" step="any" value="${esc(pow0)}"></div>`
       : `<div class="row2"><div class="field"><label for="sSize">${oral ? `${cap1(pieceW(c,2))} per ${cw}` : 'Vial size (mL)'}</label><input id="sSize" type="number" inputmode="decimal" min="0" step="any" placeholder="${oral ? 'e.g. 60' : 'e.g. 10'}" value="${esc(size0)}"></div>
@@ -3619,6 +3644,7 @@ function openStockSheet(cid, lineId){
     <div class="calc" id="sCalc"></div>
     <button class="btn btn-block" id="sSave">${line ? 'Save' : 'Add to stock'}</button><div class="form-err" id="sErr" role="alert"></div>
     ${line ? `<button class="btn btn-danger btn-block" style="margin-top:10px" id="sDel">Remove these ${cw}s from Stock</button>` : ''}`);
+  
   const read = ()=>{
     const count = num($('#sCount').value);
     const x = powder ? {powderMg: num($('#sPowder').value)} : {sizeMl: num($('#sSize').value), strength: oral ? toMg(num($('#sStr').value), c.unit) : num($('#sStr').value)};
@@ -3795,7 +3821,7 @@ function parseBackup(text){
   return {compounds, logs: Array.isArray(logs)?logs:[], activeWorkout: d.activeWorkout && Array.isArray(d.activeWorkout.items) ? d.activeWorkout : null,
     labs: Array.isArray(d.labs)?d.labs:[], health: isObj(raw.health) && isObj(raw.health.days) ? d.health : null,
     exercises: Array.isArray(d.exercises)?d.exercises:[], templates: Array.isArray(d.templates)?d.templates:[], workouts: Array.isArray(d.workouts)?d.workouts:[],
-    activities: Array.isArray(d.activities)?d.activities:[], checkins: d.checkins || [], programmes: d.programmes || [], measures: d.measures || [], weights: d.weights || [], settings: d.settings||{}, exportedAt: validDate(d.exportedAt) ? d.exportedAt : null};
+    activities: Array.isArray(d.activities)?d.activities:[], checkins: d.checkins || [], programmes: d.programmes || [], measures: d.measures || [], weights: d.weights || [], assistant: isObj(d.assistant) ? d.assistant : null, settings: d.settings||{}, exportedAt: validDate(d.exportedAt) ? d.exportedAt : null};
 }
 function backupSummary(p){
   return `Found <b>${p.compounds.length}</b> compounds, <b>${p.logs.length}</b> doses, <b>${p.labs.length}</b> lab results, <b>${p.workouts.length}</b> workouts, <b>${p.activities.length}</b> runs/walks/hikes, <b>${(p.checkins||[]).length}</b> check-ins${(p.weights||[]).length ? `, <b>${p.weights.length}</b> weigh-ins` : ''}${p.exportedAt?` · saved ${esc(fmtDate(p.exportedAt))} ${esc(fmtTime(p.exportedAt))}`:''}.`;
@@ -3886,7 +3912,7 @@ function doseCsvDate(v, order){
   if(/^\d{5}(\.\d+)?$/.test(t)){ const u = new Date(Math.round((+t - 25569) * 864e5)); return validDt(u.getUTCFullYear(), u.getUTCMonth(), u.getUTCDate(), u.getUTCHours(), u.getUTCMinutes(), u.getUTCSeconds()); }
   return strongDate(t, order);
 }
-const csvText = v => String(v==null ? '' : v).trim().replace(/^'(?=[=+\-@])/, '');
+const csvText = v => String(v==null ? '' : v).trim().replace(/^'(?=[=+\-@\t\r])/, '');
 /* → {rows:[{date, name, nk, amount, unit, site, notes}], names:{nk:{name,count}}, skipped:{baddate, nodose, future}} */
 function parseDoseCsv(text){
   const rows = parseCsv(text);
@@ -3999,7 +4025,7 @@ function doseImportReview(data){
     toast(`Imported ${p.add.length} ${p.add.length===1?'dose':'doses'}`, {label:'Undo', fn:undoSnapshot});
   });
 }
-const csvCell = v => { const t = v==null ? '' : String(v); return /[",\n\r]/.test(t) || /^[=+\-@]/.test(t) ? '"' + (/^[=+\-@]/.test(t) ? "'" : '') + t.replace(/"/g,'""') + '"' : t; };
+const csvCell = v => { const t = v==null ? '' : String(v); return /[",\n\r]/.test(t) || /^[=+\-@\t\r]/.test(t) ? '"' + (/^[=+\-@\t\r]/.test(t) ? "'" : '') + t.replace(/"/g,'""') + '"' : t; };
 function doseCsvText(){
   const byId = {}; db.compounds.forEach(c=>{ byId[c.id] = c; });
   const pad = n => String(n).padStart(2,'0');
@@ -4037,7 +4063,7 @@ async function undoSnapshot(){
 function applyBackup(parsed){
   takeSnapshot('restore');
   db.compounds = parsed.compounds; db.logs = parsed.logs; db.labs = parsed.labs; db.checkins = parsed.checkins || []; db.programmes = parsed.programmes || []; db.measures = parsed.measures || []; db.weights = parsed.weights || []; db.health = parsed.health || {days:{}};
-  db.exercises = parsed.exercises; db.templates = parsed.templates; db.workouts = parsed.workouts; db.activities = parsed.activities;
+  db.exercises = parsed.exercises; db.templates = parsed.templates; db.workouts = parsed.workouts; db.activities = parsed.activities; db.assistant = parsed.assistant || null;
   
   db.activeActivity = null; db.activeWorkout = parsed.activeWorkout; ui.draft = null; ui.tplEdit = null; ui.mode = 'inj';
   // these belong to this phone: privacy and security choices, its band, Google account, watch-data link, calendar export
@@ -4224,6 +4250,7 @@ function suppressLockOnce(){ lock.suppressUntil = Date.now() + 90000; }
 const ACTIVITY_LOCK_MS = 15*60000;   // during a run: lock only after 15 minutes away, not on every glance
 function onAppPause(){
   flushPending();
+  
   lock.pausedAt = Date.now();
   if(db.activeActivity) return;
   if(lockOn() && !lock.authing && (db.settings.lockAfter||0)===0 && Date.now() > lock.suppressUntil) showLock();
@@ -4685,7 +4712,7 @@ async function doScheduleReminders(force){
     const pend = (pending && pending.notifications) || [];
     // daily reminders are rebuilt each time; a snoozed reminder is kept unless its doses are already logged
     const drop = pend.filter(n=>{
-      if(n.id === REST_NOTIF_ID || n.id === WEEKLY_NOTIF_ID) return false;   // rest timer / weekly report: leave alone
+      if(n.id === REST_NOTIF_ID || n.id === WEEKLY_NOTIF_ID || n.id === ASSIST_NOTIF_ID) return false;   // rest timer / weekly report / assistant: leave alone
       if(n.id < SNOOZE_BASE) return true;
       const ids = (n.extra && n.extra.ids) || [];
       return !ids.some(id=>{ const c = db.compounds.find(c=>c.id===id); return c && dueFor(c, n.extra && n.extra.time); });
@@ -4798,6 +4825,7 @@ async function handleNotificationAction(a){
   closeSheet();
   if(n.id === REST_NOTIF_ID || n.channelId === 'rest'){ ui.mode = 'train'; ui.tab = 'workout'; render(); return; }
   if(n.id === WEEKLY_NOTIF_ID || extra.route === 'weekly'){ ui.mode = 'health'; ui.tab = 'hweek'; ui.weekOff = 0; render(); return; }
+  if(extra.route === 'assist'){  ui.mode = 'inj'; ui.tab = 'today'; render(); return; }
   if(extra.route === 'stock' || extra.route === 'labs'){ ui.mode = 'inj'; ui.tab = extra.route==='labs' && premiumOn() ? 'labs' : 'stock'; render(); return; }
   if(extra.route === 'checkin'){ ui.mode = 'inj'; ui.tab = 'today'; render(); openCheckinSheet(okYmd(extra.day) && extra.day <= ymd(new Date()) ? extra.day : ymd(new Date())); return; }
   ui.mode = 'inj'; ui.tab = 'today';
@@ -4863,6 +4891,8 @@ async function testNotification(){
   }catch(e){ toast('Could not send a notification.'); }
 }
 
+
+
 /* ================= Events ================= */
 document.addEventListener('click', e=>{
   const rangeBtn = e.target.closest('#hRange .opt');
@@ -4883,6 +4913,7 @@ document.addEventListener('click', e=>{
       if(a.dataset.day) skipDose(id, a.dataset.day, sl); else armButton(a, 'Confirm skip', ()=>skipDose(id, undefined, sl)); } break;
     case 'compound-add': openCompoundSheet(); break;
     case 'search': openSearch(); break;
+    
     case 'backup-pass': openBackupPassword(); break;
     case 'skip-all': skipAllMissed(id); break;
     case 'cycle-next': closeSheet(); openNextCycleSheet(id); break;
@@ -4902,7 +4933,7 @@ document.addEventListener('click', e=>{
     case 'checkin-open': openCheckinSheet(a.dataset.day); break;
     case 'checkin-skip': db.settings.checkinSkip = ymd(new Date()); save(); render(); break;
     case 'usage-ok': db.settings.usageNoticeDone = true; save(); render(); setTimeout(usageTick, 500); break;
-    case 'usage-off': db.settings.usageStats = false; db.settings.usageNoticeDone = true; save(); render(); toast('Usage count turned off. Turn it back on in Setup > App settings.'); break;
+    case 'usage-off': db.settings.usageStats = false; db.settings.usageNoticeDone = true; save(); render(); toast('No usage count is sent. You can turn it on in Setup > App settings.'); break;
     case 'usage-show': openUsageSheet(); break;
     case 'feel-pick': ui.feel = a.dataset.k; render(); break;
     case 'stock-edit': openStockSheet(id, a.dataset.line); break;
@@ -4969,10 +5000,13 @@ document.addEventListener('click', e=>{
     
     
     
+    
     case 'gd-signin': gdSignIn(); break;
     case 'gd-signout': armButton(a, 'Tap again to sign out', gdSignOut); break;
     case 'gd-backup': gdBackup(true); break;
     case 'gd-restore': gdOpenRestore(); break;
+    
+    
     
     
     
@@ -5018,6 +5052,7 @@ document.addEventListener('change', e=>{
   
   else if(t.id==='setLow'){ const n = parseInt(t.value,10); if(n>=0){ db.settings.lowStockDoses = n; save(); } }
   else if(t.id==='setCheckin'){ db.settings.checkin = t.checked; save(); }
+  
   else if(t.id==='setUsage'){ db.settings.usageStats = t.checked; db.settings.usageNoticeDone = true; save(); if(t.checked) setTimeout(usageTick, 500); }
   else if(t.id==='setWUnit'){ db.settings.wUnit = t.value; save(); render(); }
   else if(t.id==='setCiRem'){ db.settings.checkinRemind = t.checked; save(); if(t.checked) askNotifPermission(); toast(t.checked ? 'Check-in reminder at your night time' : 'Check-in reminder off'); }
@@ -5042,12 +5077,13 @@ document.addEventListener('mouseup', e=>{
 }, true);
 document.addEventListener('focusin', e=>{
   const el = e.target;
-  if(el && el.matches && el.matches('input:not([type=checkbox]):not([type=file]), textarea, select')){
+  if(el && el.matches && el.matches('input:not([type=checkbox]):not([type=file]):not([type=range]):not([type=radio]), textarea, select')){   // sliders bring up no keyboard: never scroll for them
     setTimeout(()=>{ if(document.activeElement===el){ try{ el.scrollIntoView({block:'center', behavior:'smooth'}); }catch(x){} } }, 350);
   }
 });
 document.addEventListener('keydown', e=>{
   if(e.key==='Escape' && sheetOpen) closeSheet();
+  
   // keyboards (tablets, the web app): / or Ctrl+K opens search, unless you're typing somewhere
   if(!sheetOpen && !e.altKey && ((e.key==='/' && !e.ctrlKey && !e.metaKey) || (e.key.toLowerCase()==='k' && (e.ctrlKey || e.metaKey))) && !(e.target && e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) && $('#lockScreen').hidden){ e.preventDefault(); openSearch(); }
   // tappable rows act like buttons for keyboards and switch access
@@ -5120,6 +5156,7 @@ let lastDayKey = ymd(new Date());
 setInterval(()=>{
   const k = ymd(new Date());
   if(k !== lastDayKey){ lastDayKey = k; if(!sheetOpen) render(); else closeSheet.stale = true; scheduleReminders(); }   // a new day: redraw now, or when the open sheet closes
+  
 }, 60000);
 
 /* ================= Boot ================= */

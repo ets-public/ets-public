@@ -11,11 +11,14 @@ AntiFeatures:
   - NonFreeAdd
   - NonFreeComp
   - NonFreeNet
+  - Tracking
 
 Name: Enhanced Training Studio
 Summary: "Protocol, training and recovery: doses, reminders, stock and levels"
 Description: |-
     A private tracker for your protocol: injections, orals and supplements. Everything stays on your phone.
+
+    Needs Android 9 or newer. From version 1.0.7, phones on Android 8 no longer get updates; the version they have keeps working.
 
     Free:
 
@@ -33,7 +36,9 @@ Description: |-
     * Training: workouts, templates, programmes, records and GPS runs
     * Blood tests: PDF import, markers over time and test planning
     * Health: Health Connect, readiness, a weekly report, live heart rate, measurements and progress photos
+    * Progress: Rewind, Chapters, a photo booth and a check-in for your coach
+    * An Assistant chat and on-device AI, both on your phone
 
     This is the same app, signed with the same key, as the download on https://enhancedtraining.app. The free edition's source code is at https://github.com/ets-public/ets-public; the licensed parts aren't open source, so this build isn't made from that code alone.
 
-    Anti-features: the app sells a licence (NonFreeAdd); the optional Google Drive backup uses Google's sign-in library (NonFreeComp); a licence key is checked with our licence server (NonFreeNet). Without a licence and without Drive backup, nothing is sent anywhere.
+    Anti-features: the app sells a licence (NonFreeAdd); the optional Google Drive backup uses Google's sign-in library (NonFreeComp); a licence key is checked with our licence server (NonFreeNet); and the app can send one anonymous usage count a day, but only if you tap Allow when it asks (Tracking). It has no ID and nothing you've logged, and it can be turned off in Setup › App settings. Without a licence, Drive backup or the usage count, nothing is sent anywhere.

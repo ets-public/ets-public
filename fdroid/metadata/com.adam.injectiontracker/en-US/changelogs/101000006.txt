@@ -1,4 +1,4 @@
-• With a licence: Garmin watches: pick Garmin in Health > Setup for step-by-step setup through Garmin Connect and Health Connect; resting heart rate is worked out from your heart rate readings, as Garmin doesn't share it
-• With a licence: Live heart rate: setup help for Garmin's Broadcast Heart Rate
+• With a licence: More watches through Health Connect: step-by-step setup in Health > Setup; resting heart rate is worked out from your heart rate readings when a watch doesn't share it
+• With a licence: Live heart rate: setup help for watches that broadcast heart rate
 • Daily weigh-ins: enter your weight in the daily check-in (just the weight is fine), in kg, lb or stones and pounds (Setup > Check-in)
-• With a licence: Health > Body has a Weight card with your…
+• More: https://enhancedtraining.app/changelog/
